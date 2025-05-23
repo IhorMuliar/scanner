@@ -1,75 +1,51 @@
-# Solana Token Scanner (Rust)
+# Solana Token Scanner
 
-A real-time Solana blockchain scanner that monitors token activity on Pump.fun, Raydium, and Meteora platforms. This Rust implementation detects early signals of "degen" behavior such as rapid buys, high SOL inflows, and sudden volume spikes.
+A blockchain scanner that monitors tokens launched/traded on Pump.fun, Raydium, and Meteora, detecting volume/trading spikes and identifying early pump signals.
 
-## 🚀 Features
+## Features
 
-- **Hybrid Architecture**: Combines RPC polling with real-time gRPC streaming (Yellowstone Geyser)
-- **Resilient Fallback**: Automatically continues with RPC-only mode if gRPC connection fails
-- **Real-time Block Scanning**: Continuously monitors Solana blockchain for new blocks
-- **Multi-Platform Support**: Tracks activity on Pump.fun, Raydium, and Meteora
-- **De-duplication System**: LRU cache prevents double-processing transactions
-- **Spike Detection**: Identifies tokens with high volume and buyer activity
-- **Memory Efficient**: Automatic cleanup of old token data
-- **Configurable Thresholds**: Customizable volume, buyer count, and age limits
-- **Structured Logging**: Comprehensive logging with configurable levels
+- Connects to Solana mainnet RPC using @solana/web3.js
+- Tracks real-time token activity from Pump.fun, Raydium, and Meteora
+- Detects spikes in activity (unusual volume/buy counts)
+- Logs hot tokens and their stats to the console
+- Uses configurable thresholds for spike detection
 
-## 🛠️ Tech Stack
+## Requirements
 
-- **Language**: Rust 🦀
-- **Async Runtime**: Tokio
-- **Solana Client**: solana-client, solana-sdk
-- **Concurrency**: DashMap for thread-safe collections
-- **CLI**: Clap for command-line interface
-- **Logging**: env_logger with log crate
+- Node.js v16 or higher
+- npm or yarn
 
-## 📁 Project Structure
+## Installation
 
 1. Clone the repository:
-
-```bash
+```
 git clone https://github.com/yourusername/solana-token-scanner.git
 cd solana-token-scanner
-
-# Build the project
-cargo build --release
-
-# Run with default settings
-cargo run --release
-
-# Or run with custom parameters
-cargo run --release -- \
-    --rpc-url "https://api.mainnet-beta.solana.com" \
-    --volume-threshold 5.0 \
-    --buyers-threshold 3 \
-    --age-threshold 10
 ```
 
 2. Install dependencies:
-
-```bash
+```
 npm install
 ```
 
-## 🎯 Detection Logic
+## Usage
 
 Start the scanner:
-
-```bash
+```
 npm start
 ```
 
-## 🏗️ Architecture
+The scanner will connect to Solana mainnet and start monitoring transactions for token activity, logging any detected "hot" tokens to the console.
 
-### Core Components
+## Configuration
 
-1. **TokenScanner**: Main scanner orchestrator
-2. **Config**: Configuration management
-3. **TokenMetrics**: In-memory token tracking
-4. **ProgramIds**: Platform program ID management
-5. **HotToken**: Spike detection results
+You can modify the scanner behavior by editing the CONFIG object in `index.js`:
 
-### Data Flow
+- `SOLANA_RPC_URL`: URL of the Solana RPC endpoint to connect to
+- `SCAN_INTERVAL_MS`: Interval in milliseconds between scanning cycles
+- `VOLUME_THRESHOLD`: Minimum volume in SOL required for a spike
+- `BUYERS_THRESHOLD`: Minimum number of unique buyers required for a spike
+- `AGE_THRESHOLD_MINUTES`: Maximum age in minutes for a token to be considered new
 
 ## How It Works
 
@@ -81,13 +57,13 @@ npm start
 
 ## Example Output
 
-```bash
+```
 [HOT] $PEPE — Volume: 15.2 SOL | Buyers: 8 | Age: 6 min | Platform: Pump.fun
 [HOT] $DOGE — Volume: 12.5 SOL | Buyers: 6 | Age: 10 min | Platform: Raydium
 ```
 
-### Concurrency Model
+## Notes
 
-- This is a POC implementation with simplified logic. In a production environment, we would want to add more robust error handling, logging, and monitoring.
-- For accurate token identification and detailed instruction parsing, we would need to implement program-specific instruction decoders.
-- The token extraction logic are simplified and would need to be updated with actual values and more detailed parsing.
+- This is a POC implementation with simplified logic. In a production environment, you would want to add more robust error handling, logging, and monitoring.
+- For accurate token identification and detailed instruction parsing, you would need to implement program-specific instruction decoders.
+- The current program IDs and token extraction logic are simplified and would need to be updated with actual values and more detailed parsing. 
