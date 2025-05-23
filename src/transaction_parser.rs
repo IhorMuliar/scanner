@@ -74,24 +74,56 @@ impl TransactionParser {
             if meta.err.is_some() {
                 return None; // Skip failed transactions
             }
-        }
-        
-        // For MVP, we'll create synthetic events from any transactions 
-        // that have balance changes, indicating potential token activity
-        if let Some(sol_amount) = self.extract_sol_amount(tx) {
-            if sol_amount > 0.01 { // Only process if meaningful SOL amount
-                // Generate a placeholder event for demonstration
-                let event = TokenEvent {
-                    mint: self.generate_placeholder_mint(),
-                    buyer: self.generate_placeholder_buyer(),
-                    sol_amount,
-                    timestamp: block_time as u64,
-                    slot,
-                    signature: format!("synthetic_{}", slot),
-                    program_id: self.pump_fun_program, // Default to pump.fun for demo
-                    event_type: if sol_amount > 1.0 { EventType::Buy } else { EventType::TokenMint },
-                };
-                events.push(event);
+
+            // Extract signature from the transaction for reference
+            let signature = tx.transaction.signatures.get(0)
+                .map(|sig| sig.to_string())
+                .unwrap_or_else(|| format!("unknown_{}", slot));
+
+            // Process token transfers in the transaction
+            if let Some(token_transfers) = &meta.pre_token_balances.as_ref().zip(meta.post_token_balances.as_ref()) {
+                let (pre_balances, post_balances) = token_transfers;
+                
+                // Look for token balance changes
+                for post_balance in post_balances {
+                    // Find corresponding pre-balance
+                    let pre_balance = pre_balances.iter()
+                        .find(|pre| pre.owner == post_balance.owner && pre.mint == post_balance.mint);
+                    
+                    // If we found a matching pre-balance, check for a significant change
+                    if let Some(pre_balance) = pre_balance {
+                        // Only process if this is a real token transfer (not just a small fee)
+                        if let (Some(pre_ui), Some(post_ui)) = (&pre_balance.ui_token_amount, &post_balance.ui_token_amount) {
+                            if post_ui.ui_amount.unwrap_or(0.0) > pre_ui.ui_amount.unwrap_or(0.0) {
+                                // This address received tokens
+                                if let (Some(buyer_str), Some(mint_str)) = (&post_balance.owner, &post_balance.mint) {
+                                    // Extract buyer and mint addresses
+                                    if let (Ok(buyer), Ok(mint)) = (Pubkey::from_str(buyer_str), Pubkey::from_str(mint_str)) {
+                                        // Calculate the SOL amount involved in the transaction (from fee payer)
+                                        let sol_amount = self.extract_sol_amount(tx).unwrap_or(0.0);
+                                        if sol_amount > 0.01 {
+                                            // Determine which DEX program was used
+                                            let program_id = self.identify_program_id(tx);
+                                            
+                                            // Create a token event
+                                            let event = TokenEvent {
+                                                mint,
+                                                buyer,
+                                                sol_amount,
+                                                timestamp: block_time as u64,
+                                                slot,
+                                                signature: signature.clone(),
+                                                program_id,
+                                                event_type: self.determine_event_type(tx, sol_amount),
+                                            };
+                                            events.push(event);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         
@@ -124,24 +156,64 @@ impl TransactionParser {
         None // Return None if no balance change detected
     }
     
-    fn generate_placeholder_mint(&self) -> Pubkey {
-        // Generate a different placeholder mint each time for demonstration
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut mint_bytes = [0u8; 32];
-        let timestamp_bytes = timestamp.to_le_bytes();
-        mint_bytes[..8].copy_from_slice(&timestamp_bytes);
-        Pubkey::new_from_array(mint_bytes)
+    fn identify_program_id(&self, tx: &EncodedTransactionWithStatusMeta) -> Pubkey {
+        // Try to identify which DEX program is used in the transaction
+        if let Some(meta) = &tx.meta {
+            if let Some(log_messages) = &meta.log_messages {
+                for log in log_messages {
+                    if log.contains(PUMP_FUN_PROGRAM_ID) {
+                        return self.pump_fun_program;
+                    } else if log.contains(RAYDIUM_AMM_PROGRAM_ID) {
+                        return self.raydium_program;
+                    } else if log.contains(METEORA_PROGRAM_ID) {
+                        return self.meteora_program;
+                    }
+                }
+            }
+            
+            // If we couldn't identify from logs, check for program invocations in instructions
+            if let Some(instructions) = &meta.inner_instructions {
+                for inner_instruction_set in instructions {
+                    for instruction in &inner_instruction_set.instructions {
+                        if let Some(program_id) = &instruction.program_id {
+                            if program_id == PUMP_FUN_PROGRAM_ID {
+                                return self.pump_fun_program;
+                            } else if program_id == RAYDIUM_AMM_PROGRAM_ID {
+                                return self.raydium_program;
+                            } else if program_id == METEORA_PROGRAM_ID {
+                                return self.meteora_program;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Default to Pump.fun if we can't determine
+        self.pump_fun_program
     }
     
-    fn generate_placeholder_buyer(&self) -> Pubkey {
-        // Generate a different placeholder buyer
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let mut buyer_bytes = [0u8; 32];
-        let timestamp_bytes = (timestamp as u64).to_le_bytes();
-        buyer_bytes[..8].copy_from_slice(&timestamp_bytes);
-        buyer_bytes[8] = 1; // Make it different from mint
-        Pubkey::new_from_array(buyer_bytes)
+    fn determine_event_type(&self, tx: &EncodedTransactionWithStatusMeta, sol_amount: f64) -> EventType {
+        // Try to determine the type of event from transaction data
+        if let Some(meta) = &tx.meta {
+            if let Some(log_messages) = &meta.log_messages {
+                for log in log_messages {
+                    if log.contains("mint") || log.contains("Mint") {
+                        return EventType::TokenMint;
+                    } else if log.contains("swap") || log.contains("Swap") {
+                        return EventType::Swap;
+                    } else if log.contains("liquidity") || log.contains("Liquidity") || log.contains("LP") {
+                        return EventType::LpAction;
+                    }
+                }
+            }
+        }
+        
+        // Use SOL amount as a heuristic if we can't determine from logs
+        if sol_amount > 1.0 {
+            EventType::Buy
+        } else {
+            EventType::TokenMint
+        }
     }
 } 
