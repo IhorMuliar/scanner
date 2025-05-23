@@ -1,25 +1,18 @@
 [package]
-name = "solana-token-scanner"
-version = "1.0.0"
+name = "solana-scanner"
+version = "0.1.0"
 edition = "2021"
-description = "A blockchain scanner that monitors tokens on Pump.fun, Raydium, and Meteora"
 
 [dependencies]
+solana-client = "1.17"
+solana-sdk = "1.17"
+solana-transaction-status = "1.17"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log = "0.4"
+env_logger = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.11", features = ["json"] }
-solana-client = "1.17"
-solana-sdk = "1.17"
-solana-transaction-status = "1.17"
-rust_decimal = "1.32"
-dashmap = "5.5"
-dotenv = "0.15"
-
-[dependencies.uuid]
-version = "1.0"
-features = ["v4"] 
+base64 = "0.21"
+bs58 = "0.5"
