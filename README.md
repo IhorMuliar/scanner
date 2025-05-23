@@ -25,30 +25,10 @@ A real-time Solana blockchain scanner that monitors token activity on Pump.fun, 
 
 ## 📁 Project Structure
 
-```text
-src/
-├── main.rs          # Main entry point with CLI
-├── lib.rs           # Library module exports
-├── config.rs        # Configuration structures
-├── scanner.rs       # Core scanner logic
-├── grpc_client.rs   # Yellowstone gRPC streaming client
-└── utils.rs         # Utility functions and types
-Cargo.toml           # Project dependencies
-README.md            # This file
-```
-
-## 🔧 Installation & Setup
-
-### Prerequisites
-
-- Rust 1.70+ (install via [rustup](https://rustup.rs/))
-- Solana gRPC access
-
-### Build & Run
+1. Clone the repository:
 
 ```bash
-# Clone the repository
-git clone https://github.com/IhorMuliar/scanner
+git clone https://github.com/yourusername/solana-token-scanner.git
 cd solana-token-scanner
 
 # Build the project
@@ -65,50 +45,18 @@ cargo run --release -- \
     --age-threshold 10
 ```
 
-## ⚙️ Configuration
-
-### Command Line Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--rpc-url` | `https://api.mainnet-beta.solana.com` | Solana RPC endpoint |
-| `--grpc-url` | `http://localhost:10000` | Yellowstone gRPC endpoint |
-| `--scan-interval` | `10000` | Scan interval in milliseconds |
-| `--volume-threshold` | `1.0` | Minimum volume in SOL for spike detection |
-| `--buyers-threshold` | `1` | Minimum unique buyers for spike detection |
-| `--age-threshold` | `15` | Maximum token age in minutes |
-| `--max-blocks` | `10` | Maximum blocks to process per batch |
-| `--tx-cache-size` | `10000` | LRU cache size for transaction de-duplication |
-
-### Environment Variables
-
-Set `RUST_LOG` to control logging level:
+2. Install dependencies:
 
 ```bash
-# Info level (default)
-RUST_LOG=info cargo run
-
-# Debug level for more detailed output
-RUST_LOG=debug cargo run
-
-# Error level for minimal output
-RUST_LOG=error cargo run
+npm install
 ```
 
 ## 🎯 Detection Logic
 
-The scanner identifies "hot" tokens based on:
-
-1. **Volume Threshold**: Total SOL volume exceeds configured minimum
-2. **Buyer Diversity**: Number of unique buyers meets minimum requirement
-3. **Recency**: Token age is within the specified time window
-4. **Platform Activity**: Activity detected on monitored DEX platforms
-
-### Example Output
+Start the scanner:
 
 ```bash
-🔥 [HOT] $3adf — Volume: 14.20 SOL | Buyers: 7 | Age: 6 min | Platform: Pump.fun
-🔥 [HOT] $b2c9 — Volume: 8.50 SOL | Buyers: 4 | Age: 12 min | Platform: Raydium
+npm start
 ```
 
 ## 🏗️ Architecture
@@ -123,103 +71,23 @@ The scanner identifies "hot" tokens based on:
 
 ### Data Flow
 
-```text
-Hybrid Architecture:
-┌─ RPC Polling ────────────┐    ┌─ gRPC Stream ─────────────┐
-│ Block Processing         │    │ Real-time Transactions    │
-│ Transaction Analysis     │    │ Live Token Activity       │
-└──────────────────────────┘    └───────────────────────────┘
-          │                                │
-          └─── De-duplication (LRU Cache) ──┘
-                         │
-          Token Metrics → Spike Detection → Console Output
+## How It Works
+
+1. The scanner connects to the Solana mainnet RPC and starts monitoring new blocks.
+2. For each block, it analyzes transactions looking for activity on the target platforms.
+3. When relevant transactions are found, token metrics are tracked in memory.
+4. Every scan interval, tokens are evaluated against the spike detection criteria.
+5. Hot tokens meeting the criteria are logged to the console.
+
+## Example Output
+
+```bash
+[HOT] $PEPE — Volume: 15.2 SOL | Buyers: 8 | Age: 6 min | Platform: Pump.fun
+[HOT] $DOGE — Volume: 12.5 SOL | Buyers: 6 | Age: 10 min | Platform: Raydium
 ```
 
 ### Concurrency Model
 
-- **Thread-safe Collections**: DashMap for concurrent token metrics
-- **Async Processing**: Tokio for non-blocking I/O
-- **Atomic Operations**: For shared state management
-- **Signal Handling**: Graceful shutdown on SIGINT/SIGTERM
-
-## ✅ Completed Features
-
-### gRPC Stream Integration
-
-- ✅ Real-time Yellowstone Geyser stream implementation
-- ✅ `subscribe_with_request()` for live transactions
-- ✅ Enhanced performance and lower latency
-- ✅ Hybrid architecture combining RPC polling with gRPC streaming
-
-### De-duplication System
-
-- ✅ LRU cache for transaction signatures
-- ✅ Avoid double-processing between live stream and confirmed blocks
-- ✅ Memory-efficient signature tracking
-- ✅ Configurable cache size via CLI
-
-## 🐛 Error Handling
-
-The scanner implements robust error handling:
-
-- **gRPC Connection Failures**: Automatic fallback to RPC-only mode when gRPC is unavailable
-- **Connection Resilience**: App continues running even if gRPC server is down or unreachable
-- **Block Processing Errors**: Skip problematic blocks and continue
-- **Transaction Parsing**: Graceful handling of malformed data
-- **Memory Management**: Automatic cleanup prevents memory leaks
-
-### gRPC Fallback Behavior
-
-When the application starts, it tests the gRPC connection:
-- ✅ **gRPC Available**: Runs in hybrid mode (RPC + gRPC) for optimal performance
-- ⚠️ **gRPC Unavailable**: Automatically falls back to RPC-only mode
-- 🔄 **gRPC Fails During Runtime**: Seamlessly continues with RPC polling without crashing
-
-This ensures your scanner keeps running regardless of gRPC server availability.
-
-## 🔧 Development
-
-### Running Tests
-
-```bash
-cargo test
-```
-
-### Code Formatting
-
-```bash
-cargo fmt
-```
-
-### Linting
-
-```bash
-cargo clippy
-```
-
-### Documentation
-
-```bash
-cargo doc --open
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## ⚠️ Disclaimer
-
-This tool is for educational and research purposes. Token trading involves significant risk. Always do your own research and never invest more than you can afford to lose.
-
-## Potential issues
-
-export CC=/opt/homebrew/opt/llvm/bin/clang
-export CXX=/opt/homebrew/opt/llvm/bin/clang++
+- This is a POC implementation with simplified logic. In a production environment, we would want to add more robust error handling, logging, and monitoring.
+- For accurate token identification and detailed instruction parsing, we would need to implement program-specific instruction decoders.
+- The token extraction logic are simplified and would need to be updated with actual values and more detailed parsing.
