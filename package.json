@@ -1,0 +1,19 @@
+{
+  "name": "solana-token-scanner",
+  "version": "1.0.0",
+  "description": "A blockchain scanner that monitors tokens on Pump.fun, Raydium, and Meteora",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.78.0",
+    "decimal.js": "^10.4.3",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+} 
