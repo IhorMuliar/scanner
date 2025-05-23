@@ -18,20 +18,23 @@ A blockchain scanner that monitors tokens launched/traded on Pump.fun, Raydium, 
 ## Installation
 
 1. Clone the repository:
-```
+
+```bash
 git clone https://github.com/yourusername/solana-token-scanner.git
 cd solana-token-scanner
 ```
 
 2. Install dependencies:
-```
+
+```bash
 npm install
 ```
 
 ## Usage
 
 Start the scanner:
-```
+
+```bash
 npm start
 ```
 
@@ -57,13 +60,13 @@ You can modify the scanner behavior by editing the CONFIG object in `index.js`:
 
 ## Example Output
 
-```
+```bash
 [HOT] $PEPE — Volume: 15.2 SOL | Buyers: 8 | Age: 6 min | Platform: Pump.fun
 [HOT] $DOGE — Volume: 12.5 SOL | Buyers: 6 | Age: 10 min | Platform: Raydium
 ```
 
 ## Notes
 
-- This is a POC implementation with simplified logic. In a production environment, you would want to add more robust error handling, logging, and monitoring.
-- For accurate token identification and detailed instruction parsing, you would need to implement program-specific instruction decoders.
-- The current program IDs and token extraction logic are simplified and would need to be updated with actual values and more detailed parsing. 
+- This is a POC implementation with simplified logic. In a production environment, we would want to add more robust error handling, logging, and monitoring.
+- For accurate token identification and detailed instruction parsing, we would need to implement program-specific instruction decoders.
+- The token extraction logic are simplified and would need to be updated with actual values and more detailed parsing.
