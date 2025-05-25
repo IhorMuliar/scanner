@@ -4,8 +4,10 @@ A real-time Solana blockchain scanner that monitors token activity on Pump.fun, 
 
 ## 🚀 Features
 
+- **Hybrid Architecture**: Combines RPC polling with real-time gRPC streaming (Yellowstone Geyser)
 - **Real-time Block Scanning**: Continuously monitors Solana blockchain for new blocks
 - **Multi-Platform Support**: Tracks activity on Pump.fun, Raydium, and Meteora
+- **De-duplication System**: LRU cache prevents double-processing transactions
 - **Spike Detection**: Identifies tokens with high volume and buyer activity
 - **Memory Efficient**: Automatic cleanup of old token data
 - **Configurable Thresholds**: Customizable volume, buyer count, and age limits
@@ -22,12 +24,13 @@ A real-time Solana blockchain scanner that monitors token activity on Pump.fun, 
 
 ## 📁 Project Structure
 
-```
+```text
 src/
 ├── main.rs          # Main entry point with CLI
 ├── lib.rs           # Library module exports
 ├── config.rs        # Configuration structures
 ├── scanner.rs       # Core scanner logic
+├── grpc_client.rs   # Yellowstone gRPC streaming client
 └── utils.rs         # Utility functions and types
 Cargo.toml           # Project dependencies
 README.md            # This file
@@ -68,11 +71,13 @@ cargo run --release -- \
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--rpc-url` | `https://api.mainnet-beta.solana.com` | Solana RPC endpoint |
+| `--grpc-url` | `http://localhost:10000` | Yellowstone gRPC endpoint |
 | `--scan-interval` | `10000` | Scan interval in milliseconds |
 | `--volume-threshold` | `1.0` | Minimum volume in SOL for spike detection |
 | `--buyers-threshold` | `1` | Minimum unique buyers for spike detection |
 | `--age-threshold` | `15` | Maximum token age in minutes |
 | `--max-blocks` | `10` | Maximum blocks to process per batch |
+| `--tx-cache-size` | `10000` | LRU cache size for transaction de-duplication |
 
 ### Environment Variables
 
@@ -100,7 +105,7 @@ The scanner identifies "hot" tokens based on:
 
 ### Example Output
 
-```
+```bash
 🔥 [HOT] $3adf — Volume: 14.20 SOL | Buyers: 7 | Age: 6 min | Platform: Pump.fun
 🔥 [HOT] $b2c9 — Volume: 8.50 SOL | Buyers: 4 | Age: 12 min | Platform: Raydium
 ```
@@ -117,8 +122,16 @@ The scanner identifies "hot" tokens based on:
 
 ### Data Flow
 
-```
-RPC Polling → Block Processing → Transaction Analysis → Token Metrics → Spike Detection → Console Output
+```text
+Hybrid Architecture:
+┌─ RPC Polling ────────────┐    ┌─ gRPC Stream ─────────────┐
+│ Block Processing         │    │ Real-time Transactions    │
+│ Transaction Analysis     │    │ Live Token Activity       │
+└──────────────────────────┘    └───────────────────────────┘
+          │                                │
+          └─── De-duplication (LRU Cache) ──┘
+                         │
+          Token Metrics → Spike Detection → Console Output
 ```
 
 ### Concurrency Model
@@ -128,19 +141,26 @@ RPC Polling → Block Processing → Transaction Analysis → Token Metrics → 
 - **Atomic Operations**: For shared state management
 - **Signal Handling**: Graceful shutdown on SIGINT/SIGTERM
 
-## 🔮 Future Enhancements (Steps 6-8)
+## ✅ Completed Features
 
-### Step 6: gRPC Stream Integration
-- Replace RPC polling with real-time Yellowstone Geyser stream
-- Implement `subscribe_with_request()` for live transactions
-- Enhanced performance and lower latency
+### gRPC Stream Integration
 
-### Step 7: De-duplication System
-- LRU cache for transaction signatures
-- Avoid double-processing between live stream and confirmed blocks
-- Memory-efficient signature tracking
+- ✅ Real-time Yellowstone Geyser stream implementation
+- ✅ `subscribe_with_request()` for live transactions
+- ✅ Enhanced performance and lower latency
+- ✅ Hybrid architecture combining RPC polling with gRPC streaming
+
+### De-duplication System
+
+- ✅ LRU cache for transaction signatures
+- ✅ Avoid double-processing between live stream and confirmed blocks
+- ✅ Memory-efficient signature tracking
+- ✅ Configurable cache size via CLI
+
+## 🔮 Future Enhancements
 
 ### Step 8: Database Integration
+
 - Postgres/MongoDB integration via Prisma
 - Persistent token metadata storage
 - API-ready data for frontend consumption
@@ -203,3 +223,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## ⚠️ Disclaimer
 
 This tool is for educational and research purposes. Token trading involves significant risk. Always do your own research and never invest more than you can afford to lose.
+
+export CC=/opt/homebrew/opt/llvm/bin/clang
+export CXX=/opt/homebrew/opt/llvm/bin/clang++
