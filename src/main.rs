@@ -12,6 +12,10 @@ struct Args {
     #[arg(long, default_value = "https://api.mainnet-beta.solana.com")]
     rpc_url: String,
 
+    /// Yellowstone gRPC URL
+    #[arg(long, default_value = "http://localhost:10000")]
+    grpc_url: String,
+
     /// Scan interval in milliseconds
     #[arg(long, default_value_t = 10000)]
     scan_interval: u64,
@@ -31,6 +35,10 @@ struct Args {
     /// Maximum number of blocks to process in one batch
     #[arg(long, default_value_t = 10)]
     max_blocks: u64,
+
+    /// Transaction signature cache size for de-duplication
+    #[arg(long, default_value_t = 10000)]
+    tx_cache_size: usize,
 }
 
 /// Main entry point for the Solana Token Scanner
@@ -45,6 +53,7 @@ async fn main() -> Result<()> {
     // Create configuration from CLI args
     let config = Config {
         solana_rpc_url: args.rpc_url,
+        grpc_url: args.grpc_url,
         scan_interval_ms: args.scan_interval,
         max_blocks_to_process: args.max_blocks,
         volume_threshold: args.volume_threshold,
@@ -52,6 +61,7 @@ async fn main() -> Result<()> {
         age_threshold_minutes: args.age_threshold,
         cleanup_interval_ms: 60000,
         cleanup_age_multiplier: 2,
+        tx_cache_size: args.tx_cache_size,
     };
 
     // Create and initialize scanner

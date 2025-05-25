@@ -9,6 +9,9 @@ pub struct Config {
     /// Solana RPC endpoint URL
     pub solana_rpc_url: String,
     
+    /// gRPC Yellowstone Geyser endpoint URL
+    pub grpc_url: String,
+    
     /// Scanning parameters
     pub scan_interval_ms: u64,
     pub max_blocks_to_process: u64,
@@ -21,12 +24,16 @@ pub struct Config {
     /// Memory management
     pub cleanup_interval_ms: u64,
     pub cleanup_age_multiplier: u64,
+    
+    /// De-duplication settings
+    pub tx_cache_size: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             solana_rpc_url: "https://api.mainnet-beta.solana.com".to_string(),
+            grpc_url: "http://localhost:10000".to_string(),
             scan_interval_ms: 10000, // 10 seconds
             max_blocks_to_process: 10,
             volume_threshold: 1.0, // SOL
@@ -34,6 +41,7 @@ impl Default for Config {
             age_threshold_minutes: 15,
             cleanup_interval_ms: 60000, // 1 minute
             cleanup_age_multiplier: 2,
+            tx_cache_size: 10000, // LRU cache size for transaction de-duplication
         }
     }
 }

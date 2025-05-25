@@ -1,4 +1,5 @@
 use crate::config::{BlockConfig, Config, ConnectionConfig, OutputFormat};
+use crate::grpc_client::GrpcClient;
 use crate::utils::{
     current_timestamp, HotToken, Platform, ProgramIds, TokenInfo,
     TokenMetrics,
@@ -11,12 +12,14 @@ use solana_sdk::pubkey::Pubkey;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::signal;
+use yellowstone_grpc_proto::prelude::SubscribeUpdateTransaction;
 
 /// Solana Token Scanner
 /// Monitors transactions on Solana for token trading activity and detects spikes
 pub struct TokenScanner {
     config: Config,
     client: Arc<RpcClient>,
+    grpc_client: Arc<GrpcClient>,
     is_scanning: Arc<AtomicBool>,
     token_metrics: Arc<DashMap<String, TokenMetrics>>,
     last_processed_slot: Arc<AtomicU64>,
@@ -33,6 +36,10 @@ impl TokenScanner {
         ));
 
         Self {
+            grpc_client: Arc::new(GrpcClient::new(
+                config.grpc_url.clone(),
+                config.tx_cache_size,
+            )),
             config,
             client,
             is_scanning: Arc::new(AtomicBool::new(false)),
@@ -66,7 +73,7 @@ impl TokenScanner {
         Ok(())
     }
 
-    /// Starts the continuous scanning loop
+    /// Starts the continuous scanning loop with hybrid RPC polling and gRPC streaming
     pub async fn start_scanning(&self) -> Result<()> {
         if self.is_scanning.load(Ordering::Relaxed) {
             warn!("Scanner is already running");
@@ -74,11 +81,20 @@ impl TokenScanner {
         }
 
         self.is_scanning.store(true, Ordering::Relaxed);
-        info!("📡 Starting token scanner...");
+        info!("📡 Starting hybrid token scanner (RPC + gRPC)...");
 
+        // Start RPC polling loop
         let scanner_clone = self.clone();
-        let scan_handle = tokio::spawn(async move {
+        let rpc_handle = tokio::spawn(async move {
             scanner_clone.scan_loop().await;
+        });
+
+        // Start gRPC streaming loop
+        let scanner_clone = self.clone();
+        let grpc_handle = tokio::spawn(async move {
+            if let Err(e) = scanner_clone.start_grpc_streaming().await {
+                error!("❌ gRPC streaming error: {}", e);
+            }
         });
 
         // Handle shutdown signals
@@ -87,15 +103,18 @@ impl TokenScanner {
                 info!("⚠️ Received SIGINT. Shutting down gracefully...");
                 self.stop();
             }
-            _ = scan_handle => {
-                info!("📡 Scanner loop completed");
+            _ = rpc_handle => {
+                info!("📡 RPC scanner loop completed");
+            }
+            _ = grpc_handle => {
+                info!("🌐 gRPC streaming completed");
             }
         }
 
         Ok(())
     }
 
-    /// Main scanning loop
+    /// Main scanning loop for RPC polling
     async fn scan_loop(&self) {
         while self.is_scanning.load(Ordering::Relaxed) {
             if let Err(e) = self.scan_iteration().await {
@@ -104,6 +123,20 @@ impl TokenScanner {
 
             tokio::time::sleep(self.config.scan_interval()).await;
         }
+    }
+
+    /// Start gRPC streaming for real-time transactions
+    async fn start_grpc_streaming(&self) -> Result<()> {
+        let scanner = self.clone();
+        
+        self.grpc_client
+            .start_streaming(move |tx: SubscribeUpdateTransaction| {
+                let scanner_clone = scanner.clone();
+                async move {
+                    scanner_clone.process_grpc_transaction(tx).await
+                }
+            })
+            .await
     }
 
     /// Single scan iteration
@@ -161,6 +194,31 @@ impl TokenScanner {
 
         if let Some(transactions) = block.transactions {
             for tx in transactions {
+                // De-duplication: skip if already processed via gRPC
+                // Extract signature from the transaction
+                let signature = match &tx.transaction {
+                    solana_transaction_status::EncodedTransaction::Json(ui_tx) => {
+                        ui_tx.signatures.first().cloned()
+                    }
+                    solana_transaction_status::EncodedTransaction::LegacyBinary(_data) => {
+                        // For binary transactions, we'd need to decode the signature
+                        // For now, skip de-duplication for binary transactions
+                        None
+                    }
+                    solana_transaction_status::EncodedTransaction::Binary(_data, _) => {
+                        // For binary transactions, we'd need to decode the signature
+                        // For now, skip de-duplication for binary transactions
+                        None
+                    }
+                    _ => None,
+                };
+
+                if let Some(sig) = signature {
+                    if self.grpc_client.is_transaction_seen(&sig).await {
+                        continue; // Skip already processed transaction
+                    }
+                }
+                
                 if let Err(e) = self.process_transaction(&tx, block.block_time).await {
                     error!("Error processing transaction: {}", e);
                     // Continue with next transaction
@@ -202,6 +260,71 @@ impl TokenScanner {
         }
 
         Ok(())
+    }
+
+    /// Processes a gRPC transaction from Yellowstone stream
+    async fn process_grpc_transaction(&self, tx: SubscribeUpdateTransaction) -> Result<()> {
+        // Extract transaction data from gRPC message
+        if let Some(transaction) = tx.transaction {
+            // Skip failed transactions
+            if let Some(meta) = &transaction.meta {
+                if meta.err.is_some() {
+                    return Ok(());
+                }
+
+                // Convert gRPC transaction to token info
+                if let Some(token_info) = self.create_token_info_from_grpc(&transaction).await {
+                    // Use current timestamp for real-time transactions
+                    // In production, you might want to get more accurate block time from the slot
+                    let timestamp = current_timestamp();
+                    
+                    self.update_token_metrics(token_info, timestamp).await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Creates token info from gRPC transaction data
+    async fn create_token_info_from_grpc(
+        &self,
+        transaction: &yellowstone_grpc_proto::prelude::SubscribeUpdateTransactionInfo,
+    ) -> Option<TokenInfo> {
+        // This is a simplified implementation for demonstration
+        // In a real scanner, you would parse the transaction instructions properly
+        
+        if let Some(meta) = &transaction.meta {
+            // Check for token balance changes
+            if !meta.post_token_balances.is_empty() {
+                if let Some(balance) = meta.post_token_balances.first() {
+                    if let Ok(token_mint) = balance.mint.parse::<Pubkey>() {
+                        // Calculate volume from balance changes
+                        let mut volume_lamports = 0u64;
+                        for (pre, post) in meta.pre_balances.iter().zip(meta.post_balances.iter()) {
+                            if pre > post {
+                                volume_lamports += pre - post;
+                            }
+                        }
+
+                        // Use a mock buyer address for now
+                        let buyer = Pubkey::new_unique();
+                        
+                        // Mock platform determination
+                        let platform = Platform::PumpFun;
+
+                        return Some(TokenInfo {
+                            token_mint,
+                            volume: volume_lamports,
+                            buyer,
+                            platform,
+                        });
+                    }
+                }
+            }
+        }
+        
+        None
     }
 
     /// Creates a mock token info for demonstration purposes
@@ -340,6 +463,7 @@ impl Clone for TokenScanner {
         Self {
             config: self.config.clone(),
             client: Arc::clone(&self.client),
+            grpc_client: Arc::clone(&self.grpc_client),
             is_scanning: Arc::clone(&self.is_scanning),
             token_metrics: Arc::clone(&self.token_metrics),
             last_processed_slot: Arc::clone(&self.last_processed_slot),
