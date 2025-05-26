@@ -28,3 +28,7 @@ lru = "0.12"
 futures = "0.3"
 # Tonic for gRPC transport
 tonic = "0.12"
+# Database ORM using SQLx (more stable than Prisma for Rust)
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid"] }
+# Database connection pooling
+tokio-postgres = "0.7"
