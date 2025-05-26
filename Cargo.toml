@@ -19,12 +19,12 @@ dashmap = "5.5"
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] } 
 # gRPC dependencies for Yellowstone Geyser integration
-yellowstone-grpc-client = "=6.1.0"
-yellowstone-grpc-proto = "=6.1.0"
-bs58 = "0.5.0"
-# LRU cache for de-duplication
-lru = "0.12"
-# Futures for stream handling
-futures = "0.3"
-# Tonic for gRPC transport
-tonic = "0.12"
+# yellowstone-grpc-client = "=6.1.0"
+# yellowstone-grpc-proto = "=6.1.0"
+# bs58 = "0.5.0"
+# # LRU cache for de-duplication
+# lru = "0.12"
+# # Futures for stream handling
+# futures = "0.3"
+# # Tonic for gRPC transport
+# tonic = "0.12"
