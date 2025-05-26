@@ -41,13 +41,13 @@ README.md            # This file
 ### Prerequisites
 
 - Rust 1.70+ (install via [rustup](https://rustup.rs/))
-- Solana RPC access (mainnet-beta recommended)
+- Solana gRPC access
 
 ### Build & Run
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
+git clone https://github.com/IhorMuliar/scanner
 cd solana-token-scanner
 
 # Build the project
@@ -157,15 +157,6 @@ Hybrid Architecture:
 - ✅ Memory-efficient signature tracking
 - ✅ Configurable cache size via CLI
 
-## 🔮 Future Enhancements
-
-### Step 8: Database Integration
-
-- Postgres/MongoDB integration via Prisma
-- Persistent token metadata storage
-- API-ready data for frontend consumption
-- Microservices architecture support
-
 ## 🐛 Error Handling
 
 The scanner implements robust error handling:
@@ -201,13 +192,6 @@ cargo clippy
 cargo doc --open
 ```
 
-## 📊 Performance
-
-- **Memory Usage**: ~10-50MB depending on token activity
-- **CPU Usage**: Low, primarily I/O bound
-- **Network**: RPC call frequency based on scan interval
-- **Throughput**: Processes 10+ blocks per scan cycle
-
 ## 🤝 Contributing
 
 1. Fork the repository
@@ -223,6 +207,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## ⚠️ Disclaimer
 
 This tool is for educational and research purposes. Token trading involves significant risk. Always do your own research and never invest more than you can afford to lose.
+
+## Potential issues
 
 export CC=/opt/homebrew/opt/llvm/bin/clang
 export CXX=/opt/homebrew/opt/llvm/bin/clang++
