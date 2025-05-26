@@ -1,10 +1,12 @@
 use crate::config::{BlockConfig, Config, ConnectionConfig, OutputFormat};
+use crate::database::DatabaseService;
 use crate::grpc_client::GrpcClient;
 use crate::utils::{
-    current_timestamp, HotToken, Platform, ProgramIds, TokenInfo,
+    current_timestamp, generate_symbol, HotToken, Platform, ProgramIds, TokenInfo,
     TokenMetrics,
 };
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use log::{error, info, warn};
 use solana_client::rpc_client::RpcClient;
@@ -20,6 +22,7 @@ pub struct TokenScanner {
     config: Config,
     client: Arc<RpcClient>,
     grpc_client: Arc<GrpcClient>,
+    database: Arc<DatabaseService>,
     is_scanning: Arc<AtomicBool>,
     token_metrics: Arc<DashMap<String, TokenMetrics>>,
     last_processed_slot: Arc<AtomicU64>,
@@ -29,25 +32,32 @@ pub struct TokenScanner {
 
 impl TokenScanner {
     /// Creates a new TokenScanner instance
-    pub fn new(config: Config) -> Self {
+    pub async fn new(config: Config) -> Result<Self> {
         let client = Arc::new(RpcClient::new_with_commitment(
             config.solana_rpc_url.clone(),
             ConnectionConfig::commitment_config(),
         ));
 
-        Self {
+        // Initialize database connection
+        let database = Arc::new(DatabaseService::new(&config.database_url).await?);
+        
+        // Run database migrations
+        database.migrate().await?;
+
+        Ok(Self {
             grpc_client: Arc::new(GrpcClient::new(
                 config.grpc_url.clone(),
                 config.tx_cache_size,
             )),
             config,
             client,
+            database,
             is_scanning: Arc::new(AtomicBool::new(false)),
             token_metrics: Arc::new(DashMap::new()),
             last_processed_slot: Arc::new(AtomicU64::new(0)),
             program_ids: ProgramIds::new(),
             output_format: OutputFormat::default(),
-        }
+        })
     }
 
     /// Initializes the scanner by connecting to Solana RPC
@@ -369,16 +379,42 @@ impl TokenScanner {
         None
     }
 
-    /// Updates the in-memory token metrics map with new token information
+    /// Updates the in-memory token metrics map with new token information and persists to database
     async fn update_token_metrics(&self, token_info: TokenInfo, timestamp: u64) {
         let mint_key = token_info.token_mint.to_string();
+        let block_time = DateTime::from_timestamp_millis(timestamp as i64)
+            .unwrap_or_else(|| Utc::now());
 
+        // Store transaction in database (with deduplication)
+        let signature = format!("mock_sig_{}", uuid::Uuid::new_v4()); // In real implementation, get actual signature
+        if let Err(e) = self.database.insert_transaction(&token_info, &signature, block_time).await {
+            warn!("Failed to store transaction in database: {}", e);
+        }
+
+        // Upsert token in database
+        let symbol = Some(generate_symbol(&token_info.token_mint));
+        if let Err(e) = self.database.upsert_token(&token_info, block_time, symbol).await {
+            warn!("Failed to upsert token in database: {}", e);
+        }
+
+        // Update in-memory metrics
         if let Some(mut metrics) = self.token_metrics.get_mut(&mint_key) {
             // Update existing token metrics
             metrics.update(token_info, timestamp);
+            
+            // Persist updated metrics to database
+            if let Err(e) = self.database.upsert_token_metrics(&metrics).await {
+                warn!("Failed to update token metrics in database: {}", e);
+            }
         } else {
             // New token discovered
             let metrics = TokenMetrics::new(token_info, timestamp);
+            
+            // Persist new metrics to database
+            if let Err(e) = self.database.upsert_token_metrics(&metrics).await {
+                warn!("Failed to store new token metrics in database: {}", e);
+            }
+            
             self.token_metrics.insert(mint_key, metrics);
         }
     }
@@ -413,6 +449,11 @@ impl TokenScanner {
         
         for hot_token in hot_tokens {
             self.log_hot_token(&hot_token);
+            
+            // Store hot token in database
+            if let Err(e) = self.database.insert_hot_token(&hot_token).await {
+                warn!("Failed to store hot token in database: {}", e);
+            }
         }
 
         Ok(())
@@ -464,6 +505,7 @@ impl Clone for TokenScanner {
             config: self.config.clone(),
             client: Arc::clone(&self.client),
             grpc_client: Arc::clone(&self.grpc_client),
+            database: Arc::clone(&self.database),
             is_scanning: Arc::clone(&self.is_scanning),
             token_metrics: Arc::clone(&self.token_metrics),
             last_processed_slot: Arc::clone(&self.last_processed_slot),

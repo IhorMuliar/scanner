@@ -16,6 +16,10 @@ struct Args {
     #[arg(long, default_value = "http://localhost:10000")]
     grpc_url: String,
 
+    /// Database URL (PostgreSQL)
+    #[arg(long, default_value = "postgresql://postgres:password@localhost:5432/solana_scanner")]
+    database_url: String,
+
     /// Scan interval in milliseconds
     #[arg(long, default_value_t = 10000)]
     scan_interval: u64,
@@ -54,6 +58,7 @@ async fn main() -> Result<()> {
     let config = Config {
         solana_rpc_url: args.rpc_url,
         grpc_url: args.grpc_url,
+        database_url: args.database_url,
         scan_interval_ms: args.scan_interval,
         max_blocks_to_process: args.max_blocks,
         volume_threshold: args.volume_threshold,
@@ -65,7 +70,7 @@ async fn main() -> Result<()> {
     };
 
     // Create and initialize scanner
-    let scanner = TokenScanner::new(config);
+    let scanner = TokenScanner::new(config).await?;
     
     if let Err(e) = scanner.initialize().await {
         error!("❌ Failed to initialize scanner: {}", e);

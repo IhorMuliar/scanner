@@ -12,6 +12,9 @@ pub struct Config {
     /// gRPC Yellowstone Geyser endpoint URL
     pub grpc_url: String,
     
+    /// Database connection URL (PostgreSQL)
+    pub database_url: String,
+    
     /// Scanning parameters
     pub scan_interval_ms: u64,
     pub max_blocks_to_process: u64,
@@ -34,6 +37,7 @@ impl Default for Config {
         Self {
             solana_rpc_url: "https://api.mainnet-beta.solana.com".to_string(),
             grpc_url: "http://localhost:10000".to_string(),
+            database_url: "postgresql://postgres:password@localhost:5432/solana_scanner".to_string(),
             scan_interval_ms: 10000, // 10 seconds
             max_blocks_to_process: 10,
             volume_threshold: 1.0, // SOL
