@@ -4,6 +4,7 @@ use anyhow::Result;
 
 mod config;
 mod scanner;
+mod utils;
 
 use crate::scanner::TokenScanner;
 
