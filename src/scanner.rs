@@ -63,6 +63,23 @@ impl TokenScanner {
         self.last_processed_slot.store(current_slot, Ordering::Relaxed);
         
         info!("✅ Connected to Solana RPC: {}", self.config.solana_rpc_url);
+        
+        // Test gRPC connection
+        match self.grpc_client.try_connect().await {
+            Ok(true) => {
+                info!("✅ gRPC connection available: {}", self.config.grpc_url);
+                info!("🔗 Running in hybrid mode (RPC + gRPC)");
+            }
+            Ok(false) => {
+                warn!("⚠️ gRPC connection unavailable: {}", self.config.grpc_url);
+                warn!("🔗 Running in RPC-only mode");
+            }
+            Err(e) => {
+                warn!("⚠️ gRPC connection test failed: {}", e);
+                warn!("🔗 Running in RPC-only mode");
+            }
+        }
+        
         info!("✅ Starting scan from slot: {}", current_slot);
         info!("📊 Spike detection criteria:");
         info!("   - Volume > {} SOL", self.config.volume_threshold);
@@ -89,11 +106,17 @@ impl TokenScanner {
             scanner_clone.scan_loop().await;
         });
 
-        // Start gRPC streaming loop
+        // Start gRPC streaming loop with fallback handling
         let scanner_clone = self.clone();
         let grpc_handle = tokio::spawn(async move {
-            if let Err(e) = scanner_clone.start_grpc_streaming().await {
-                error!("❌ gRPC streaming error: {}", e);
+            match scanner_clone.start_grpc_streaming().await {
+                Ok(_) => {
+                    info!("✅ gRPC streaming completed");
+                }
+                Err(e) => {
+                    warn!("⚠️ gRPC streaming failed, continuing with RPC-only mode: {}", e);
+                    // Continue running - don't exit the application
+                }
             }
         });
 
@@ -125,12 +148,12 @@ impl TokenScanner {
         }
     }
 
-    /// Start gRPC streaming for real-time transactions
+    /// Start gRPC streaming for real-time transactions with fallback handling
     async fn start_grpc_streaming(&self) -> Result<()> {
         let scanner = self.clone();
         
         self.grpc_client
-            .start_streaming(move |tx: SubscribeUpdateTransaction| {
+            .start_streaming_with_fallback(move |tx: SubscribeUpdateTransaction| {
                 let scanner_clone = scanner.clone();
                 async move {
                     scanner_clone.process_grpc_transaction(tx).await

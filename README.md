@@ -5,6 +5,7 @@ A real-time Solana blockchain scanner that monitors token activity on Pump.fun, 
 ## 🚀 Features
 
 - **Hybrid Architecture**: Combines RPC polling with real-time gRPC streaming (Yellowstone Geyser)
+- **Resilient Fallback**: Automatically continues with RPC-only mode if gRPC connection fails
 - **Real-time Block Scanning**: Continuously monitors Solana blockchain for new blocks
 - **Multi-Platform Support**: Tracks activity on Pump.fun, Raydium, and Meteora
 - **De-duplication System**: LRU cache prevents double-processing transactions
@@ -161,10 +162,20 @@ Hybrid Architecture:
 
 The scanner implements robust error handling:
 
-- **Connection Failures**: Automatic retry with exponential backoff
+- **gRPC Connection Failures**: Automatic fallback to RPC-only mode when gRPC is unavailable
+- **Connection Resilience**: App continues running even if gRPC server is down or unreachable
 - **Block Processing Errors**: Skip problematic blocks and continue
 - **Transaction Parsing**: Graceful handling of malformed data
 - **Memory Management**: Automatic cleanup prevents memory leaks
+
+### gRPC Fallback Behavior
+
+When the application starts, it tests the gRPC connection:
+- ✅ **gRPC Available**: Runs in hybrid mode (RPC + gRPC) for optimal performance
+- ⚠️ **gRPC Unavailable**: Automatically falls back to RPC-only mode
+- 🔄 **gRPC Fails During Runtime**: Seamlessly continues with RPC polling without crashing
+
+This ensures your scanner keeps running regardless of gRPC server availability.
 
 ## 🔧 Development
 

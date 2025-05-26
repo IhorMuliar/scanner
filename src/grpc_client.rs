@@ -124,8 +124,77 @@ impl GrpcClient {
         request
     }
 
-    /// Start the gRPC streaming loop
-    pub async fn start_streaming<F, Fut>(&self, mut on_transaction: F) -> Result<()>
+    /// Attempt to establish gRPC connection with fallback handling
+    pub async fn try_connect(&self) -> Result<bool> {
+        match self.test_grpc_connection().await {
+            Ok(_) => {
+                info!("✅ gRPC connection test successful");
+                Ok(true)
+            }
+            Err(e) => {
+                warn!("⚠️ gRPC connection failed, will continue with RPC-only mode: {}", e);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Test gRPC connection without starting full streaming
+    async fn test_grpc_connection(&self) -> Result<()> {
+        info!("🔍 Testing gRPC connection to: {}", self.grpc_url);
+        
+        let _client = GeyserGrpcClient::build_from_shared(self.grpc_url.clone())
+            .context("Failed to build gRPC client")?
+            .connect()
+            .await
+            .context("Failed to connect to gRPC server")?;
+            
+        info!("✅ gRPC connection test passed");
+        Ok(())
+    }
+
+    /// Start the gRPC streaming loop with improved error handling
+    #[allow(unused_mut)]
+    pub async fn start_streaming_with_fallback<F, Fut>(&self, mut on_transaction: F) -> Result<()>
+    where
+        F: FnMut(yellowstone_grpc_proto::prelude::SubscribeUpdateTransaction) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<()>> + Send,
+    {
+        // First test if we can connect
+        if !self.try_connect().await? {
+            warn!("🔌 gRPC connection unavailable, running in RPC-only mode");
+            // Keep the method running but do nothing (fallback to RPC-only mode)
+            tokio::time::sleep(tokio::time::Duration::from_secs(u64::MAX)).await;
+            return Ok(());
+        }
+
+        // If connection test passed, attempt streaming
+        match self.start_streaming_internal(on_transaction).await {
+            Ok(_) => {
+                info!("✅ gRPC streaming completed successfully");
+                Ok(())
+            }
+            Err(e) => {
+                error!("❌ gRPC streaming failed: {}", e);
+                warn!("🔄 Falling back to RPC-only mode");
+                // Don't return error, just log and continue in RPC-only mode
+                tokio::time::sleep(tokio::time::Duration::from_secs(u64::MAX)).await;
+                Ok(())
+            }
+        }
+    }
+
+    /// Start the gRPC streaming loop (legacy method - kept for backward compatibility)
+    pub async fn start_streaming<F, Fut>(&self, on_transaction: F) -> Result<()>
+    where
+        F: FnMut(yellowstone_grpc_proto::prelude::SubscribeUpdateTransaction) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<()>> + Send,
+    {
+        // Delegate to the new fallback-enabled method
+        self.start_streaming_with_fallback(on_transaction).await
+    }
+
+    /// Internal streaming implementation
+    async fn start_streaming_internal<F, Fut>(&self, mut on_transaction: F) -> Result<()>
     where
         F: FnMut(yellowstone_grpc_proto::prelude::SubscribeUpdateTransaction) -> Fut + Send,
         Fut: std::future::Future<Output = Result<()>> + Send,
@@ -158,8 +227,7 @@ impl GrpcClient {
                 }
                 Err(e) => {
                     error!("❌ gRPC stream error: {}", e);
-                    // Optionally implement reconnection logic here
-                    break;
+                    return Err(anyhow::anyhow!("gRPC stream error: {}", e));
                 }
             }
         }
