@@ -1,6 +1,6 @@
 # Spike Detection Analysis & Improvement Plan
 
-## 🔍 Current Logic Overview
+## Current Logic Overview
 
 ### **Existing Detection Method:**
 
@@ -20,13 +20,13 @@ FOR each token in memory:
 
 ### **Weaknesses:**
 
-❌ **Static thresholds** - no market adaptation  
-❌ **Accumulation-based** - misses velocity spikes  
-❌ **No baseline comparison** - can't detect relative anomalies
+**Static thresholds** - no market adaptation  
+**Accumulation-based** - misses velocity spikes  
+**No baseline comparison** - can't detect relative anomalies
 
 ---
 
-## 🚀 Required Improvements
+## Required Improvements
 
 ### **1. Velocity-Based Detection**
 
