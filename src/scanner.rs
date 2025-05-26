@@ -416,9 +416,9 @@ impl TokenScanner {
             
             // Skip tokens older than threshold
             let age_minutes = metrics.age_minutes(current_time);
-            if age_minutes > self.config.age_threshold_minutes {
-                continue;
-            }
+            // if age_minutes > self.config.age_threshold_minutes {
+            //     continue;
+            // }
 
             let volume_in_sol = metrics.volume_in_sol();
             let unique_buyers_count = metrics.unique_buyers_count();
@@ -445,7 +445,7 @@ impl TokenScanner {
     fn log_hot_token(&self, token: &HotToken) {
         let format = &self.output_format;
         println!(
-            "{} {} — {}{:.2} SOL{}{}{}{}{}{} min{}{}{}{} | {}", 
+            "{} {} — {}{:.2} SOL{}{}{}{}{}{}{}{}{}{} | {}", 
             format.hot_token_prefix,
             token.symbol,
             format.volume_label,

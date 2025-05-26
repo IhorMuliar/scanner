@@ -1,8 +1,9 @@
-
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use log::warn;
 
 /// Known program IDs for platforms we're monitoring
 #[derive(Debug, Clone)]
@@ -123,7 +124,15 @@ impl TokenMetrics {
     }
     
     pub fn age_minutes(&self, current_time: u64) -> u64 {
-        (current_time - self.first_seen) / (60 * 1000)
+        let diff_ms = current_time - self.first_seen;
+
+        if diff_ms == 0 {
+            return 0;
+        } else if diff_ms < 60 * 1000 {
+            return 1;
+        }
+        
+        diff_ms / (60 * 1000)
     }
 }
 
