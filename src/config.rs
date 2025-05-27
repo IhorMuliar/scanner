@@ -1,5 +1,6 @@
 use solana_client::rpc_config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
+use solana_transaction_status::UiTransactionEncoding;
 
 /// Scanner configuration settings
 pub struct Config;
@@ -9,13 +10,17 @@ impl Config {
     pub const SOLANA_RPC_URL: &'static str = "https://api.mainnet-beta.solana.com";
     
     // Scanning parameters
-    pub const SCAN_INTERVAL_MS: u64 = 10000; // 10 seconds between scan cycles
-    pub const MAX_BLOCKS_TO_PROCESS: u64 = 10; // Maximum blocks to process in one batch
+    pub const SCAN_INTERVAL_MS: u64 = 50000; // 5 seconds between scan cycles
+    pub const MAX_BLOCKS_TO_PROCESS: u64 = 20; // Maximum blocks to process in one batch
     
     // Spike detection thresholds
     pub const VOLUME_THRESHOLD: f64 = 1.0; // Minimum volume in SOL
     pub const BUYERS_THRESHOLD: usize = 1; // Minimum unique buyers
     pub const AGE_THRESHOLD_MINUTES: u64 = 15; // Maximum age to be considered "new"
+    
+    // Ratio-based spike detection
+    pub const RATIO_THRESHOLD: f64 = 1.3; // SOL/buys ratio threshold
+    pub const RATIO_TIME_WINDOW_MINUTES: u64 = 5; // Time window for ratio-based detection (minutes)
     
     // Memory management
     pub const CLEANUP_INTERVAL_MS: u64 = 60000; // How often to clean up old tokens (1 minute)
@@ -30,7 +35,7 @@ pub fn get_connection_config() -> CommitmentConfig {
 /// Block fetch configuration
 pub fn get_block_config() -> RpcBlockConfig {
     RpcBlockConfig {
-        encoding: None,
+        encoding: Some(UiTransactionEncoding::JsonParsed),
         transaction_details: Some(solana_transaction_status::TransactionDetails::Full),
         rewards: Some(false),
         commitment: Some(CommitmentConfig::confirmed()),
