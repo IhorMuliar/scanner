@@ -1,497 +1,480 @@
-use crate::config::{BlockConfig, Config, ConnectionConfig, OutputFormat};
-use crate::grpc_client::GrpcClient;
-use crate::utils::{
-    current_timestamp, HotToken, Platform, ProgramIds, TokenInfo,
-    TokenMetrics,
-};
-use anyhow::{Context, Result};
-use dashmap::DashMap;
-use log::{error, info, warn};
-use solana_client::rpc_client::RpcClient;
-use solana_sdk::pubkey::Pubkey;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::signal;
-use yellowstone_grpc_proto::prelude::SubscribeUpdateTransaction;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio::time::{sleep, Duration, Instant};
+use solana_client::rpc_client::RpcClient;
+use solana_transaction_status::UiConfirmedBlock;
+use log::{info, error};
+use anyhow::Result;
+use tokio::sync::Mutex;
+use std::collections::HashSet;
+
+use crate::config::{Config, get_connection_config, get_block_config};
+use crate::utils::{
+    ProgramIds, determine_platform, TokenInfo, create_token_info,
+    TokenMetricsManager, SpikeDetectionResult, format_spike_output,
+    get_current_timestamp
+};
 
 /// Solana Token Scanner
 /// Monitors transactions on Solana for token trading activity and detects spikes
+#[derive(Clone)]
 pub struct TokenScanner {
-    config: Config,
-    client: Arc<RpcClient>,
-    grpc_client: Arc<GrpcClient>,
+    connection: Arc<RpcClient>,
     is_scanning: Arc<AtomicBool>,
-    token_metrics: Arc<DashMap<String, TokenMetrics>>,
     last_processed_slot: Arc<AtomicU64>,
-    program_ids: ProgramIds,
-    output_format: OutputFormat,
+    token_metrics: Arc<Mutex<TokenMetricsManager>>,
+    detected_spikes: Arc<Mutex<HashSet<String>>>,
+    last_cleanup: Arc<Mutex<Instant>>,
 }
 
 impl TokenScanner {
     /// Creates a new TokenScanner instance
-    pub fn new(config: Config) -> Self {
-        let client = Arc::new(RpcClient::new_with_commitment(
-            config.solana_rpc_url.clone(),
-            ConnectionConfig::commitment_config(),
+    pub async fn new() -> Result<Self> {
+        let connection = Arc::new(RpcClient::new_with_commitment(
+            Config::SOLANA_RPC_URL.to_string(),
+            get_connection_config(),
         ));
 
-        Self {
-            grpc_client: Arc::new(GrpcClient::new(
-                config.grpc_url.clone(),
-                config.tx_cache_size,
-            )),
-            config,
-            client,
+        Ok(Self {
+            connection,
             is_scanning: Arc::new(AtomicBool::new(false)),
-            token_metrics: Arc::new(DashMap::new()),
             last_processed_slot: Arc::new(AtomicU64::new(0)),
-            program_ids: ProgramIds::new(),
-            output_format: OutputFormat::default(),
-        }
+            token_metrics: Arc::new(Mutex::new(TokenMetricsManager::new())),
+            detected_spikes: Arc::new(Mutex::new(HashSet::new())),
+            last_cleanup: Arc::new(Mutex::new(Instant::now())),
+        })
     }
 
     /// Initializes the scanner by connecting to Solana RPC
-    pub async fn initialize(&self) -> Result<()> {
+    pub async fn initialize(&mut self) -> Result<()> {
         info!("🚀 Initializing Solana Token Scanner...");
+        info!("✅ Connected to Solana RPC: {}", Config::SOLANA_RPC_URL);
         
-        // Test connection and get current slot
-        let current_slot = self
-            .client
-            .get_slot()
-            .context("Failed to connect to Solana RPC")?;
-        
-        self.last_processed_slot.store(current_slot, Ordering::Relaxed);
-        
-        info!("✅ Connected to Solana RPC: {}", self.config.solana_rpc_url);
-        
-        // Test gRPC connection
-        match self.grpc_client.try_connect().await {
-            Ok(true) => {
-                info!("✅ gRPC connection available: {}", self.config.grpc_url);
-                info!("🔗 Running in hybrid mode (RPC + gRPC)");
-            }
-            Ok(false) => {
-                warn!("⚠️ gRPC connection unavailable: {}", self.config.grpc_url);
-                warn!("🔗 Running in RPC-only mode");
-            }
-            Err(e) => {
-                warn!("⚠️ gRPC connection test failed: {}", e);
-                warn!("🔗 Running in RPC-only mode");
-            }
-        }
-        
+        // Get current slot to start scanning from
+        let current_slot = self.connection.get_slot()?;
+        self.last_processed_slot.store(current_slot, Ordering::SeqCst);
         info!("✅ Starting scan from slot: {}", current_slot);
+        
         info!("📊 Spike detection criteria:");
-        info!("   - Volume > {} SOL", self.config.volume_threshold);
-        info!("   - Unique buyers ≥ {}", self.config.buyers_threshold);
-        info!("   - Token age < {} minutes", self.config.age_threshold_minutes);
-        info!("🔍 Scanning for token activity...");
-
+        info!("   - Volume > {} SOL", Config::VOLUME_THRESHOLD);
+        info!("   - Unique buyers ≥ {}", Config::BUYERS_THRESHOLD);
+        info!("   - Token age < {} minutes", Config::AGE_THRESHOLD_MINUTES);
+        info!("   - OR: SOL/buys ratio > {} within {} minutes", 
+            Config::RATIO_THRESHOLD, Config::RATIO_TIME_WINDOW_MINUTES);
+        info!("");
+        info!("🔍 Scanning for block activity...");
+        
         Ok(())
     }
 
-    /// Starts the continuous scanning loop with hybrid RPC polling and gRPC streaming
+    /// Starts the continuous scanning loop
     pub async fn start_scanning(&self) -> Result<()> {
-        if self.is_scanning.load(Ordering::Relaxed) {
-            warn!("Scanner is already running");
+        if self.is_scanning.load(Ordering::SeqCst) {
             return Ok(());
         }
-
-        self.is_scanning.store(true, Ordering::Relaxed);
-        info!("📡 Starting hybrid token scanner (RPC + gRPC)...");
-
-        // Start RPC polling loop
-        let scanner_clone = self.clone();
-        let rpc_handle = tokio::spawn(async move {
-            scanner_clone.scan_loop().await;
-        });
-
-        // Start gRPC streaming loop with fallback handling
-        let scanner_clone = self.clone();
-        let grpc_handle = tokio::spawn(async move {
-            match scanner_clone.start_grpc_streaming().await {
-                Ok(_) => {
-                    info!("✅ gRPC streaming completed");
-                }
-                Err(e) => {
-                    warn!("⚠️ gRPC streaming failed, continuing with RPC-only mode: {}", e);
-                    // Continue running - don't exit the application
-                }
+        
+        self.is_scanning.store(true, Ordering::SeqCst);
+        
+        while self.is_scanning.load(Ordering::SeqCst) {
+            if let Err(e) = self.scan_new_blocks().await {
+                error!("❌ Error during scan: {}", e);
+                // Continue scanning despite errors
             }
-        });
-
-        // Handle shutdown signals
-        tokio::select! {
-            _ = signal::ctrl_c() => {
-                info!("⚠️ Received SIGINT. Shutting down gracefully...");
-                self.stop();
-            }
-            _ = rpc_handle => {
-                info!("📡 RPC scanner loop completed");
-            }
-            _ = grpc_handle => {
-                info!("🌐 gRPC streaming completed");
-            }
+            
+            // Perform periodic cleanup
+            self.perform_cleanup().await;
+            
+            sleep(Duration::from_millis(Config::SCAN_INTERVAL_MS)).await;
         }
-
-        Ok(())
-    }
-
-    /// Main scanning loop for RPC polling
-    async fn scan_loop(&self) {
-        while self.is_scanning.load(Ordering::Relaxed) {
-            if let Err(e) = self.scan_iteration().await {
-                error!("❌ Error during scan iteration: {}", e);
-            }
-
-            tokio::time::sleep(self.config.scan_interval()).await;
-        }
-    }
-
-    /// Start gRPC streaming for real-time transactions with fallback handling
-    async fn start_grpc_streaming(&self) -> Result<()> {
-        let scanner = self.clone();
         
-        self.grpc_client
-            .start_streaming_with_fallback(move |tx: SubscribeUpdateTransaction| {
-                let scanner_clone = scanner.clone();
-                async move {
-                    scanner_clone.process_grpc_transaction(tx).await
-                }
-            })
-            .await
-    }
-
-    /// Single scan iteration
-    async fn scan_iteration(&self) -> Result<()> {
-        // Scan new blocks
-        self.scan_new_blocks().await?;
-        
-        // Detect spikes
-        self.detect_spikes().await?;
-        
-        // Cleanup old tokens periodically
-        self.cleanup_old_tokens().await;
-
         Ok(())
     }
 
     /// Scans new blocks since the last processed slot
     async fn scan_new_blocks(&self) -> Result<()> {
-        let current_slot = self.client.get_slot()?;
-        let last_processed = self.last_processed_slot.load(Ordering::Relaxed);
-
-        if current_slot <= last_processed {
+        // Get the latest slot
+        let current_slot = self.connection.get_slot()?;
+        let last_slot = self.last_processed_slot.load(Ordering::SeqCst);
+        
+        if current_slot <= last_slot {
             return Ok(()); // No new blocks to process
         }
-
+        
         // Process blocks in batches to avoid overwhelming the RPC
-        let end_slot = std::cmp::min(
-            current_slot,
-            last_processed + self.config.max_blocks_to_process,
-        );
-
-        for slot in (last_processed + 1)..=end_slot {
-            if let Err(e) = self.process_block(slot).await {
-                error!("❌ Error processing block {}: {}", slot, e);
-                // Continue with next block instead of failing completely
-            }
+        let max_blocks_to_process = Config::MAX_BLOCKS_TO_PROCESS;
+        let end_slot = std::cmp::min(current_slot, last_slot + max_blocks_to_process);
+        
+        info!("📦 Processing blocks {} to {} (current: {})", last_slot + 1, end_slot, current_slot);
+        
+        for slot in (last_slot + 1)..=end_slot {
+            self.process_block(slot).await?;
         }
-
-        self.last_processed_slot.store(end_slot, Ordering::Relaxed);
+        
+        self.last_processed_slot.store(end_slot, Ordering::SeqCst);
+        
+        // Check for spikes after processing blocks
+        self.detect_and_report_spikes().await;
+        
         Ok(())
     }
 
     /// Processes a single block, analyzing its transactions
     async fn process_block(&self, slot: u64) -> Result<()> {
-        let block = match self
-            .client
-            .get_block_with_config(slot, BlockConfig::rpc_block_config())
-        {
-            Ok(block) => block,
-            Err(e) => {
-                warn!("Could not fetch block {}: {}", slot, e);
-                return Ok(());
-            }
-        };
-
-        if let Some(transactions) = block.transactions {
-            for tx in transactions {
-                // De-duplication: skip if already processed via gRPC
-                // Extract signature from the transaction
-                let signature = match &tx.transaction {
-                    solana_transaction_status::EncodedTransaction::Json(ui_tx) => {
-                        ui_tx.signatures.first().cloned()
-                    }
-                    solana_transaction_status::EncodedTransaction::LegacyBinary(_data) => {
-                        // For binary transactions, we'd need to decode the signature
-                        // For now, skip de-duplication for binary transactions
-                        None
-                    }
-                    solana_transaction_status::EncodedTransaction::Binary(_data, _) => {
-                        // For binary transactions, we'd need to decode the signature
-                        // For now, skip de-duplication for binary transactions
-                        None
-                    }
-                    _ => None,
-                };
-
-                if let Some(sig) = signature {
-                    if self.grpc_client.is_transaction_seen(&sig).await {
-                        continue; // Skip already processed transaction
+        match self.connection.get_block_with_config(slot, get_block_config()) {
+            Ok(block) => {
+                let tx_count = block.transactions.as_ref().map(|txs| txs.len()).unwrap_or(0);
+                let block_time = block.block_time.unwrap_or(0);
+                
+                info!("🧱 Block {}: {} transactions, block_time: {}", slot, tx_count, block_time);
+                
+                // Process each transaction in the block
+                if let Some(transactions) = &block.transactions {
+                    for tx in transactions {
+                        self.process_transaction(tx, &block).await;
                     }
                 }
                 
-                if let Err(e) = self.process_transaction(&tx, block.block_time).await {
-                    error!("Error processing transaction: {}", e);
-                    // Continue with next transaction
-                }
+                Ok(())
+            }
+            Err(e) => {
+                error!("❌ Error processing block {}: {}", slot, e);
+                // Don't crash on block fetch errors, just log and continue
+                Ok(())
             }
         }
-
-        Ok(())
     }
 
     /// Processes a single transaction, looking for token activity
-    async fn process_transaction(
-        &self,
-        tx: &solana_transaction_status::EncodedTransactionWithStatusMeta,
-        block_time: Option<i64>,
-    ) -> Result<()> {
-        // Skip failed transactions
-        if tx.meta.as_ref().map_or(true, |meta| meta.err.is_some()) {
-            return Ok(());
-        }
+    async fn process_transaction(&self, tx: &solana_transaction_status::EncodedTransactionWithStatusMeta, _block: &UiConfirmedBlock) {
+        // Check if transaction has metadata and didn't error
+        let _meta = match &tx.meta {
+            Some(meta) if meta.err.is_none() => meta,
+            _ => return,
+        };
 
-        // For now, create a mock token for demonstration
-        // In a real implementation, you would parse the transaction properly
-        if let Some(meta) = &tx.meta {
-            // Check if there are any token balance changes
-            match &meta.post_token_balances {
-                solana_transaction_status::option_serializer::OptionSerializer::Some(post_balances) => {
-                    if !post_balances.is_empty() {
-                        // Create a mock token for demonstration
-                        let mock_token_info = self.create_mock_token_info(meta, block_time);
-                        if let Some(token_info) = mock_token_info {
-                            let timestamp = block_time.map(|t| (t * 1000) as u64).unwrap_or_else(current_timestamp);
-                            self.update_token_metrics(token_info, timestamp).await;
-                        }
+        // Extract account keys from the transaction - simplified approach
+        let account_keys = match &tx.transaction {
+            solana_transaction_status::EncodedTransaction::Json(ui_tx) => {
+                match &ui_tx.message {
+                    solana_transaction_status::UiMessage::Parsed(parsed_msg) => {
+                        parsed_msg.account_keys.iter().map(|key| key.pubkey.clone()).collect::<Vec<String>>()
                     }
-                }
-                _ => {}
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Processes a gRPC transaction from Yellowstone stream
-    async fn process_grpc_transaction(&self, tx: SubscribeUpdateTransaction) -> Result<()> {
-        // Extract transaction data from gRPC message
-        if let Some(transaction) = tx.transaction {
-            // Skip failed transactions
-            if let Some(meta) = &transaction.meta {
-                if meta.err.is_some() {
-                    return Ok(());
-                }
-
-                // Convert gRPC transaction to token info
-                if let Some(token_info) = self.create_token_info_from_grpc(&transaction).await {
-                    // Use current timestamp for real-time transactions
-                    // In production, you might want to get more accurate block time from the slot
-                    let timestamp = current_timestamp();
-                    
-                    self.update_token_metrics(token_info, timestamp).await;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Creates token info from gRPC transaction data
-    async fn create_token_info_from_grpc(
-        &self,
-        transaction: &yellowstone_grpc_proto::prelude::SubscribeUpdateTransactionInfo,
-    ) -> Option<TokenInfo> {
-        // This is a simplified implementation for demonstration
-        // In a real scanner, you would parse the transaction instructions properly
-        
-        if let Some(meta) = &transaction.meta {
-            // Check for token balance changes
-            if !meta.post_token_balances.is_empty() {
-                if let Some(balance) = meta.post_token_balances.first() {
-                    if let Ok(token_mint) = balance.mint.parse::<Pubkey>() {
-                        // Calculate volume from balance changes
-                        let mut volume_lamports = 0u64;
-                        for (pre, post) in meta.pre_balances.iter().zip(meta.post_balances.iter()) {
-                            if pre > post {
-                                volume_lamports += pre - post;
-                            }
-                        }
-
-                        // Use a mock buyer address for now
-                        let buyer = Pubkey::new_unique();
-                        
-                        // Mock platform determination
-                        let platform = Platform::PumpFun;
-
-                        return Some(TokenInfo {
-                            token_mint,
-                            volume: volume_lamports,
-                            buyer,
-                            platform,
-                        });
+                    solana_transaction_status::UiMessage::Raw(raw_msg) => {
+                        raw_msg.account_keys.clone()
                     }
                 }
             }
-        }
+            solana_transaction_status::EncodedTransaction::LegacyBinary(_) => return,
+            solana_transaction_status::EncodedTransaction::Binary(_, _) => return,
+            solana_transaction_status::EncodedTransaction::Accounts(_) => return,
+        };
+
+        // Check if transaction involves any of our target programs
+        let program_ids = vec![
+            ProgramIds::PUMP_FUN,
+            // ProgramIds::RAYDIUM_AMM,
+            // ProgramIds::METEORA,
+        ];
+
+        let relevant_program_index = account_keys.iter().position(|key| program_ids.contains(&key.as_str()));
         
-        None
+        if let Some(program_index) = relevant_program_index {
+            // Extract token information from the transaction
+            if let Some(token_info) = self.extract_token_info(tx, program_index, &account_keys) {
+                // Update token metrics
+                self.update_token_metrics(token_info).await;
+            }
+        }
     }
 
-    /// Creates a mock token info for demonstration purposes
-    fn create_mock_token_info(
-        &self,
-        meta: &solana_transaction_status::UiTransactionStatusMeta,
-        _block_time: Option<i64>,
-    ) -> Option<TokenInfo> {
-        // This is a simplified mock implementation
-        // In a real scanner, you would parse the transaction instructions properly
+    /// Extracts token information from a transaction
+    fn extract_token_info(&self, tx: &solana_transaction_status::EncodedTransactionWithStatusMeta, program_index: usize, account_keys: &[String]) -> Option<TokenInfo> {
+        // let _account_keys = match &tx.transaction {
+        //     solana_transaction_status::EncodedTransaction::Json(ui_tx) => {
+        //         info!("🔍 Processing transaction {:?}", ui_tx.signatures);
+
+        //         match &ui_tx.message {
+        //             solana_transaction_status::UiMessage::Parsed(parsed_msg) => {
+        //                 // info!("🔍 Processing parsed instructions {:?}", parsed_msg.instructions);
+
+        //                 for instruction in &parsed_msg.instructions {
+        //                     match instruction {
+        //                         solana_transaction_status::UiInstruction::Parsed(parsed_instruction) => {
+        //                             // info!("🔍 Processing parsed instruction");
+
+        //                             match &parsed_instruction {
+        //                                 solana_transaction_status::UiParsedInstruction::Parsed(parsed_instruction) => {
+        //                                     info!("🔍 Processing parsed instruction {:?}", parsed_instruction);
+        //                                 }
+        //                                 solana_transaction_status::UiParsedInstruction::PartiallyDecoded(partially_decoded_instruction) => {
+        //                                     info!("🔍 Processing partially decoded instruction {:?}", partially_decoded_instruction);
+        //                                 }
+        //                             }
+        //                         }
+        //                         solana_transaction_status::UiInstruction::Compiled(_) => {
+        //                             // info!("🔍 Processing compiled instruction");
+        //                         }
+        //                     }
+        //                 }
+        //             }
+        //             solana_transaction_status::UiMessage::Raw(raw_msg) => {
+        //                 info!("🔍 Processing raw instructions {:?}", raw_msg.instructions);
+        //             }
+        //         }
+        //     }
+        //     solana_transaction_status::EncodedTransaction::LegacyBinary(_) => return None,
+        //     solana_transaction_status::EncodedTransaction::Binary(_, _) => return None,
+        //     solana_transaction_status::EncodedTransaction::Accounts(_) => return None,
+        // };
+        let meta = tx.meta.as_ref()?;
         
-        match &meta.post_token_balances {
-            solana_transaction_status::option_serializer::OptionSerializer::Some(post_balances) => {
-                if let Some(balance) = post_balances.first() {
-                    if let Ok(token_mint) = balance.mint.parse::<Pubkey>() {
-                        // Calculate volume from balance changes
-                        let mut volume_lamports = 0u64;
-                        for (pre, post) in meta.pre_balances.iter().zip(meta.post_balances.iter()) {
-                            if pre > post {
-                                volume_lamports += pre - post;
-                            }
+        // Get program ID
+        let program_id = account_keys.get(program_index)?.clone();
+        
+        // Extract token mint address from transaction accounts
+        // Look for token mint in the account keys (typically one of the first few accounts)
+        let token_mint_address = self.find_token_mint_in_accounts(&account_keys, &program_id)?;
+
+        // Extract volume (in lamports) - simplified estimation
+        let mut volume_lamports = 0u64;
+        for (pre_balance, post_balance) in meta.pre_balances.iter().zip(meta.post_balances.iter()) {
+            if pre_balance > post_balance {
+                volume_lamports += pre_balance - post_balance;
+            }
+        }
+
+        // Only process transactions with meaningful volume
+        if volume_lamports == 0 {
+            return None;
+        }
+
+        // Get buyer address (first account key, simplified)
+        let buyer_address = account_keys.get(0)?.clone();
+        
+        // Determine platform
+        let platform = determine_platform(&program_id);
+
+        Some(create_token_info(
+            token_mint_address,
+            volume_lamports,
+            buyer_address,
+            platform,
+        ))
+    }
+
+    /// Finds the token mint address in the transaction accounts
+    fn find_token_mint_in_accounts(&self, account_keys: &[String], program_id: &str) -> Option<String> {
+        // For different platforms, the token mint is typically at different positions
+        match program_id {
+            // Pump.fun: token mint is usually the second account
+            crate::utils::ProgramIds::PUMP_FUN => {
+                account_keys.get(1).cloned()
+            }
+            // Raydium: token mint is usually one of the first few accounts
+            crate::utils::ProgramIds::RAYDIUM_AMM => {
+                // Look for a valid token mint in the first few accounts
+                for i in 1..std::cmp::min(5, account_keys.len()) {
+                    if let Some(account) = account_keys.get(i) {
+                        if self.is_likely_token_mint(account) {
+                            return Some(account.clone());
                         }
-
-                        // Use a mock buyer address
-                        let buyer = Pubkey::new_unique();
-                        
-                        // Mock platform (in real implementation, determine from program ID)
-                        let platform = Platform::PumpFun;
-
-                        return Some(TokenInfo {
-                            token_mint,
-                            volume: volume_lamports,
-                            buyer,
-                            platform,
-                        });
                     }
                 }
+                None
             }
-            _ => {}
-        }
-        
-        None
-    }
-
-    /// Updates the in-memory token metrics map with new token information
-    async fn update_token_metrics(&self, token_info: TokenInfo, timestamp: u64) {
-        let mint_key = token_info.token_mint.to_string();
-
-        if let Some(mut metrics) = self.token_metrics.get_mut(&mint_key) {
-            // Update existing token metrics
-            metrics.update(token_info, timestamp);
-        } else {
-            // New token discovered
-            let metrics = TokenMetrics::new(token_info, timestamp);
-            self.token_metrics.insert(mint_key, metrics);
-        }
-    }
-
-    /// Detects spikes in token activity and logs them to console
-    async fn detect_spikes(&self) -> Result<()> {
-        let current_time = current_timestamp();
-        let mut hot_tokens = Vec::new();
-
-        for entry in self.token_metrics.iter() {
-            let metrics = entry.value();
-            
-            // Skip tokens older than threshold
-            let age_minutes = metrics.age_minutes(current_time);
-            // if age_minutes > self.config.age_threshold_minutes {
-            //     continue;
-            // }
-
-            let volume_in_sol = metrics.volume_in_sol();
-            let unique_buyers_count = metrics.unique_buyers_count();
-
-            // Apply spike detection criteria
-            if volume_in_sol > self.config.volume_threshold 
-                && unique_buyers_count >= self.config.buyers_threshold 
-            {
-                hot_tokens.push(HotToken::from(metrics));
+            // Meteora: similar to Raydium
+            crate::utils::ProgramIds::METEORA => {
+                for i in 1..std::cmp::min(5, account_keys.len()) {
+                    if let Some(account) = account_keys.get(i) {
+                        if self.is_likely_token_mint(account) {
+                            return Some(account.clone());
+                        }
+                    }
+                }
+                None
+            }
+            // Unknown program: try to find any valid token mint
+            _ => {
+                for account in account_keys.iter().skip(1) {
+                    if self.is_likely_token_mint(account) {
+                        return Some(account.clone());
+                    }
+                }
+                None
             }
         }
-
-        // Sort by volume and log the results
-        hot_tokens.sort_by(|a, b| b.volume_in_sol.partial_cmp(&a.volume_in_sol).unwrap());
-        
-        for hot_token in hot_tokens {
-            self.log_hot_token(&hot_token);
-        }
-
-        Ok(())
     }
 
-    /// Logs information about a hot token to the console
-    fn log_hot_token(&self, token: &HotToken) {
-        let format = &self.output_format;
-        println!(
-            "{} {} — {}{:.2} SOL{}{}{}{}{}{}{}{}{}{} | {}", 
-            format.hot_token_prefix,
-            token.symbol,
-            format.volume_label,
-            token.volume_in_sol,
-            format.separator,
-            format.buyers_label,
-            token.unique_buyers_count,
-            format.separator,
-            format.age_label,
-            token.age_minutes,
-            format.age_unit,
-            format.separator,
-            format.platform_label,
-            token.platform.as_str(),
-            token.mint.to_string()
+    /// Checks if an account address is likely a token mint
+    fn is_likely_token_mint(&self, address: &str) -> bool {
+        // Basic validation: must be a valid Solana public key
+        if !crate::utils::is_valid_public_key(address) {
+            return false;
+        }
+        
+        // Additional heuristics could be added here:
+        // - Check if it's not a known system program
+        // - Check if it's not a known token program
+        // - Validate against known mint patterns
+        
+        // For now, just ensure it's a valid public key and not a system program
+        !self.is_system_program(address)
+    }
+
+    /// Checks if an address is a known system program
+    fn is_system_program(&self, address: &str) -> bool {
+        matches!(address,
+            "11111111111111111111111111111111" |  // System Program
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" |  // Token Program
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" |  // Associated Token Program
+            "ComputeBudget111111111111111111111111111111" |  // Compute Budget Program
+            "Vote111111111111111111111111111111111111111" |  // Vote Program
+            "Stake11111111111111111111111111111111111111"    // Stake Program
+        )
+    }
+
+    /// Updates token metrics with new transaction data
+    async fn update_token_metrics(&self, token_info: TokenInfo) {
+        let mut metrics_manager = self.token_metrics.lock().await;
+        
+        metrics_manager.update_token(
+            token_info.token_mint.clone(),
+            token_info.volume,
+            token_info.buyer,
+            token_info.platform,
         );
+        
+        // Log the token activity
+        if let Some(token_metrics) = metrics_manager.get_token(&token_info.token_mint) {
+            // info!(
+            //     "💰 Token activity: {} | Volume: {:.2} SOL | Buyers: {} | Age: {} min | Platform: {}",
+            //     token_metrics.symbol,
+            //     token_metrics.get_volume_sol(),
+            //     token_metrics.get_buyer_count(),
+            //     token_metrics.get_age_minutes(),
+            //     token_metrics.platform
+            // );
+        }
     }
 
-    /// Removes old tokens from memory to prevent memory leaks
-    async fn cleanup_old_tokens(&self) {
-        let current_time = current_timestamp();
-        let old_threshold_ms = self.config.age_threshold_minutes * 60 * 1000 * self.config.cleanup_age_multiplier;
+    /// Detects and reports token spikes
+    async fn detect_and_report_spikes(&self) {
+        let metrics_manager = self.token_metrics.lock().await;
+        let mut detected_spikes = self.detected_spikes.lock().await;
+        
+        // Process standard volume/buyer spikes
+        // let spike_tokens = metrics_manager.get_spike_tokens(
+        //     Config::VOLUME_THRESHOLD,
+        //     Config::BUYERS_THRESHOLD,
+        //     Config::AGE_THRESHOLD_MINUTES,
+        // );
+        
+        // for token_metrics in spike_tokens {
+        //     // Check if this is a new spike (not previously detected)
+        //     let is_new_spike = !detected_spikes.contains(&token_metrics.token_mint);
+            
+        //     if is_new_spike {
+        //         detected_spikes.insert(token_metrics.token_mint.clone());
+                
+        //         let spike_result = SpikeDetectionResult::new(token_metrics.clone(), true);
+        //         let output = format_spike_output(&spike_result);
+                
+        //         // Log the spike with high visibility
+        //         info!("{}", output);
+                
+        //         // Also log to console with special formatting
+        //         println!("\n{}", "=".repeat(80));
+        //         println!("{}", output);
+        //         println!("{}", "=".repeat(80));
+        //     }
+        // }
+        
+        // Process ratio-based spikes (SOL/buys ratio)
+        let ratio_spike_tokens = metrics_manager.get_ratio_spike_tokens(
+            Config::RATIO_THRESHOLD,
+            Config::RATIO_TIME_WINDOW_MINUTES,
+        );
+        
+        for (token_metrics, recent_sol, recent_buys) in ratio_spike_tokens {
+            // Skip if already detected as a standard spike
+            if detected_spikes.contains(&token_metrics.token_mint) {
+                continue;
+            }
+            
+            // Mark as detected
+            detected_spikes.insert(token_metrics.token_mint.clone());
+            
+            // Create spike result with ratio information
+            let spike_result = SpikeDetectionResult::new(token_metrics.clone(), true)
+                .with_ratio_spike(recent_sol, recent_buys);
+            
+            let output = format_spike_output(&spike_result);
+            
+            // Log the spike with high visibility
+            // info!("{}", output);
+            
+            // // Also log to console with special formatting
+            // println!("\n{}", "=".repeat(80));
+            // println!("{}", output);
+            // println!("{}", "=".repeat(80));
+        }
+        
+        // Log summary statistics
+        let total_tokens = metrics_manager.get_token_count();
+        let active_spikes = detected_spikes.len();
+        
+        if total_tokens > 0 {
+            info!("📈 Summary: {} tokens tracked, {} active spikes", total_tokens, active_spikes);
+        }
+    }
 
-        self.token_metrics.retain(|_, metrics| {
-            current_time - metrics.last_seen <= old_threshold_ms
-        });
+    /// Performs periodic cleanup of old data
+    async fn perform_cleanup(&self) {
+        let mut last_cleanup = self.last_cleanup.lock().await;
+        let now = Instant::now();
+        
+        if now.duration_since(*last_cleanup).as_millis() >= Config::CLEANUP_INTERVAL_MS as u128 {
+            *last_cleanup = now;
+            
+            let mut metrics_manager = self.token_metrics.lock().await;
+            let mut detected_spikes = self.detected_spikes.lock().await;
+            
+            let cleanup_age = Config::AGE_THRESHOLD_MINUTES * Config::CLEANUP_AGE_MULTIPLIER;
+            let initial_token_count = metrics_manager.get_token_count();
+            
+            // Clean up old tokens
+            metrics_manager.cleanup_old_tokens(cleanup_age);
+            
+            // Clean up old spike records
+            let cutoff_time = get_current_timestamp() - (cleanup_age * 60 * 1000);
+            detected_spikes.retain(|token_mint| {
+                if let Some(token) = metrics_manager.get_token(token_mint) {
+                    token.first_seen >= cutoff_time
+                } else {
+                    false // Remove if token no longer exists
+                }
+            });
+            
+            let final_token_count = metrics_manager.get_token_count();
+            let cleaned_count = initial_token_count.saturating_sub(final_token_count);
+            
+            if cleaned_count > 0 {
+                info!("🧹 Cleanup: removed {} old tokens, {} tokens remaining", cleaned_count, final_token_count);
+            }
+        }
     }
 
     /// Stops the scanner
-    pub fn stop(&self) {
-        self.is_scanning.store(false, Ordering::Relaxed);
+    pub async fn stop(&self) {
+        self.is_scanning.store(false, Ordering::SeqCst);
         info!("🛑 Scanner stopped.");
-    }
-}
-
-impl Clone for TokenScanner {
-    fn clone(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            client: Arc::clone(&self.client),
-            grpc_client: Arc::clone(&self.grpc_client),
-            is_scanning: Arc::clone(&self.is_scanning),
-            token_metrics: Arc::clone(&self.token_metrics),
-            last_processed_slot: Arc::clone(&self.last_processed_slot),
-            program_ids: self.program_ids.clone(),
-            output_format: self.output_format.clone(),
-        }
+        
+        // Final summary
+        let metrics_manager = self.token_metrics.lock().await;
+        let detected_spikes = self.detected_spikes.lock().await;
+        
+        info!("📊 Final summary:");
+        info!("   - Total tokens tracked: {}", metrics_manager.get_token_count());
+        info!("   - Total spikes detected: {}", detected_spikes.len());
     }
 } 
