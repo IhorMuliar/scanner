@@ -1,225 +1,223 @@
-# Solana Token Scanner (Rust)
+# Solana Transaction Scanner
 
-A real-time Solana blockchain scanner that monitors token activity on Pump.fun, Raydium, and Meteora platforms. This Rust implementation detects early signals of "degen" behavior such as rapid buys, high SOL inflows, and sudden volume spikes.
+A high-performance Rust application for scanning the Solana blockchain in real-time. This tool monitors blockchain activity, processes blocks sequentially, and provides detailed logging of each individual transaction as it's discovered.
 
-## 🚀 Features
+## Features
 
-- **Hybrid Architecture**: Combines RPC polling with real-time gRPC streaming (Yellowstone Geyser)
-- **Resilient Fallback**: Automatically continues with RPC-only mode if gRPC connection fails
-- **Real-time Block Scanning**: Continuously monitors Solana blockchain for new blocks
-- **Multi-Platform Support**: Tracks activity on Pump.fun, Raydium, and Meteora
-- **De-duplication System**: LRU cache prevents double-processing transactions
-- **Spike Detection**: Identifies tokens with high volume and buyer activity
-- **Memory Efficient**: Automatic cleanup of old token data
-- **Configurable Thresholds**: Customizable volume, buyer count, and age limits
-- **Structured Logging**: Comprehensive logging with configurable levels
+- 🚀 **Real-time Transaction Scanning**: Continuously monitors the Solana blockchain for new transactions
+- 📊 **Comprehensive Transaction Logging**: Detailed information for each transaction including signature, status, fees, compute units, and accounts
+- ⚡ **High Performance**: Built with Rust and async/await for optimal performance
+- 🔧 **Configurable**: Command-line arguments and environment variable support
+- 🛡️ **Error Handling**: Robust error handling with automatic retry mechanisms
+- 💾 **Deduplication**: Smart caching to avoid processing the same block twice
+- 🎯 **Flexible Starting Point**: Start from latest block or specific slot number
+- 🔄 **Graceful Shutdown**: Clean shutdown on Ctrl+C with statistics summary
+- ✅ **Success/Failure Detection**: Clear indication of successful vs failed transactions
 
-## 🛠️ Tech Stack
+## Prerequisites
 
-- **Language**: Rust 🦀
-- **Async Runtime**: Tokio
-- **Solana Client**: solana-client, solana-sdk
-- **Concurrency**: DashMap for thread-safe collections
-- **CLI**: Clap for command-line interface
-- **Logging**: env_logger with log crate
+- Rust 1.70+ installed
+- Internet connection to access Solana RPC endpoints
 
-## 📁 Project Structure
+## Installation
 
-```text
-src/
-├── main.rs          # Main entry point with CLI
-├── lib.rs           # Library module exports
-├── config.rs        # Configuration structures
-├── scanner.rs       # Core scanner logic
-├── grpc_client.rs   # Yellowstone gRPC streaming client
-└── utils.rs         # Utility functions and types
-Cargo.toml           # Project dependencies
-README.md            # This file
-```
+1. Clone the repository:
+   ```bash
+   git clone <repository-url>
+   cd scanner
+   ```
 
-## 🔧 Installation & Setup
+2. Build the application:
+   ```bash
+   cargo build --release
+   ```
 
-### Prerequisites
+## Usage
 
-- Rust 1.70+ (install via [rustup](https://rustup.rs/))
-- Solana gRPC access
+### Basic Usage
 
-### Build & Run
-
+Run the scanner with default settings (mainnet, 1-second intervals):
 ```bash
-# Clone the repository
-git clone https://github.com/IhorMuliar/scanner
-cd solana-token-scanner
-
-# Build the project
-cargo build --release
-
-# Run with default settings
-cargo run --release
-
-# Or run with custom parameters
-cargo run --release -- \
-    --rpc-url "https://api.mainnet-beta.solana.com" \
-    --volume-threshold 5.0 \
-    --buyers-threshold 3 \
-    --age-threshold 10
+cargo run
 ```
-
-## ⚙️ Configuration
 
 ### Command Line Options
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--rpc-url` | `https://api.mainnet-beta.solana.com` | Solana RPC endpoint |
-| `--grpc-url` | `http://localhost:10000` | Yellowstone gRPC endpoint |
-| `--scan-interval` | `10000` | Scan interval in milliseconds |
-| `--volume-threshold` | `1.0` | Minimum volume in SOL for spike detection |
-| `--buyers-threshold` | `1` | Minimum unique buyers for spike detection |
-| `--age-threshold` | `15` | Maximum token age in minutes |
-| `--max-blocks` | `10` | Maximum blocks to process per batch |
-| `--tx-cache-size` | `10000` | LRU cache size for transaction de-duplication |
+```bash
+cargo run -- --help
+```
+
+Available options:
+- `-r, --rpc-url <URL>`: Solana RPC endpoint (default: mainnet-beta)
+- `-i, --interval <SECONDS>`: Polling interval in seconds (default: 1)
+- `-s, --start-slot <SLOT>`: Starting slot number (default: 0 for latest)
+- `-m, --max-blocks <COUNT>`: Maximum blocks to process (default: 0 for unlimited)
+
+### Examples
+
+**Scan mainnet starting from latest block:**
+```bash
+cargo run -- --rpc-url https://api.mainnet-beta.solana.com
+```
+
+**Scan testnet with 2-second intervals:**
+```bash
+cargo run -- --rpc-url https://api.testnet.solana.com --interval 2
+```
+
+**Process only 5 blocks starting from a specific slot:**
+```bash
+cargo run -- --start-slot 250000000 --max-blocks 5
+```
+
+**Development with debug logging:**
+```bash
+RUST_LOG=debug cargo run
+```
+
+## Output Format
+
+Each transaction will be logged with the following information:
+
+```
+💳 NEW TRANSACTION DETECTED
+  ✅ Status: SUCCESS
+  📝 Signature: 5GGa6C3YUdKeshbrbf2vw1XjuytJ1kRDg7hBdBy3uMfe5DPqHAdcaKZhfh5xLMsTV5cX9NPDQQzFLGJvK67AQxUC
+  📍 Slot: 336361683
+  🔗 Block: LcsPEnF6Z3eDyAUkrTmvXUBKLh8E1LNJi7Ek2qyuV22
+  🧾 Instructions: 1
+  💰 Fee: 0.000005 SOL (5000 lamports)
+  ⚡ Compute Units: 2100
+  👥 Accounts: 3
+  🔑 Recent Blockhash: 5WksNRxXBcXX1V6MFdyZ9tBqYZPwhs...
+  ⏰ Processed At: 12:43:48.698
+  ➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖
+```
+
+For failed transactions, you'll also see:
+```
+  ❌ Status: FAILED
+  ⚠️  Error: InstructionError(0, Custom(0))
+```
+
+## Configuration
 
 ### Environment Variables
 
-Set `RUST_LOG` to control logging level:
+Create a `.env` file in the project root to set default configuration:
 
+```env
+# Solana RPC endpoint
+RPC_URL=https://api.mainnet-beta.solana.com
+
+# Logging level
+RUST_LOG=info
+```
+
+### Logging Levels
+
+- `error`: Only critical errors
+- `warn`: Warnings and errors
+- `info`: General information (default)
+- `debug`: Detailed debugging information
+- `trace`: Very verbose logging
+
+## Network Options
+
+### Mainnet
 ```bash
-# Info level (default)
-RUST_LOG=info cargo run
+cargo run -- --rpc-url https://api.mainnet-beta.solana.com
+```
 
-# Debug level for more detailed output
+### Testnet
+```bash
+cargo run -- --rpc-url https://api.testnet.solana.com
+```
+
+### Devnet
+```bash
+cargo run -- --rpc-url https://api.devnet.solana.com
+```
+
+### Custom RPC
+```bash
+cargo run -- --rpc-url https://your-custom-rpc.com
+```
+
+## Performance Tips
+
+1. **Adjust Polling Interval**: Lower intervals (0.5s) for faster scanning, higher intervals (2-5s) for less load
+2. **Use Custom RPC**: For better performance, consider using a dedicated RPC endpoint
+3. **Resource Monitoring**: Monitor CPU and memory usage during long-running scans
+4. **Network Stability**: Ensure stable internet connection for consistent scanning
+
+Note: Transaction volumes can be very high (thousands per block), so consider starting with testnet or limited block counts for testing.
+
+## Troubleshooting
+
+### Common Issues
+
+**Connection Errors:**
+- Verify RPC endpoint is accessible
+- Check internet connection
+- Try different RPC endpoints
+
+**Rate Limiting:**
+- Increase polling interval with `--interval`
+- Use a dedicated RPC service
+- Consider implementing request throttling
+
+**High Output Volume:**
+- Transactions can be very numerous (5000+ per block on mainnet)
+- Use `--max-blocks` to limit output for testing
+- Consider output redirection: `cargo run > transactions.log`
+
+### Debug Mode
+
+Enable debug logging for troubleshooting:
+```bash
 RUST_LOG=debug cargo run
-
-# Error level for minimal output
-RUST_LOG=error cargo run
 ```
 
-## 🎯 Detection Logic
+## Architecture
 
-The scanner identifies "hot" tokens based on:
+The scanner consists of several key components:
 
-1. **Volume Threshold**: Total SOL volume exceeds configured minimum
-2. **Buyer Diversity**: Number of unique buyers meets minimum requirement
-3. **Recency**: Token age is within the specified time window
-4. **Platform Activity**: Activity detected on monitored DEX platforms
+- **SolanaBlockScanner**: Main scanner struct that manages the scanning process
+- **ProcessedTransaction**: Data structure representing a processed transaction with detailed metadata
+- **ProcessedBlock**: Data structure representing a processed block with metadata
+- **RPC Client**: Handles communication with Solana blockchain
+- **Caching System**: Prevents duplicate processing using DashMap
+- **Error Handling**: Comprehensive error handling with retry logic
 
-### Example Output
+## Transaction Data
 
-```bash
-🔥 [HOT] $3adf — Volume: 14.20 SOL | Buyers: 7 | Age: 6 min | Platform: Pump.fun
-🔥 [HOT] $b2c9 — Volume: 8.50 SOL | Buyers: 4 | Age: 12 min | Platform: Raydium
-```
+Each transaction log includes:
 
-## 🏗️ Architecture
+- **Signature**: Unique transaction identifier
+- **Status**: SUCCESS or FAILED with error details
+- **Slot & Block**: Location information on the blockchain
+- **Instructions**: Number of instructions in the transaction
+- **Fee**: Transaction fee in SOL and lamports
+- **Compute Units**: Computational resources consumed
+- **Accounts**: Number of accounts involved
+- **Recent Blockhash**: Blockhash used for the transaction
+- **Timestamp**: When the transaction was processed
 
-### Core Components
+## Future Enhancements
 
-1. **TokenScanner**: Main scanner orchestrator
-2. **Config**: Configuration management
-3. **TokenMetrics**: In-memory token tracking
-4. **ProgramIds**: Platform program ID management
-5. **HotToken**: Spike detection results
+Current version provides comprehensive transaction logging. Future versions could include:
+- Transaction filtering by program/account
+- Token transfer detection and analysis
+- Smart contract interaction monitoring
+- Database storage options
+- Real-time alerting for specific transaction patterns
+- JSON output format for integration
 
-### Data Flow
+## License
 
-```text
-Hybrid Architecture:
-┌─ RPC Polling ────────────┐    ┌─ gRPC Stream ─────────────┐
-│ Block Processing         │    │ Real-time Transactions    │
-│ Transaction Analysis     │    │ Live Token Activity       │
-└──────────────────────────┘    └───────────────────────────┘
-          │                                │
-          └─── De-duplication (LRU Cache) ──┘
-                         │
-          Token Metrics → Spike Detection → Console Output
-```
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-### Concurrency Model
+## Contributing
 
-- **Thread-safe Collections**: DashMap for concurrent token metrics
-- **Async Processing**: Tokio for non-blocking I/O
-- **Atomic Operations**: For shared state management
-- **Signal Handling**: Graceful shutdown on SIGINT/SIGTERM
-
-## ✅ Completed Features
-
-### gRPC Stream Integration
-
-- ✅ Real-time Yellowstone Geyser stream implementation
-- ✅ `subscribe_with_request()` for live transactions
-- ✅ Enhanced performance and lower latency
-- ✅ Hybrid architecture combining RPC polling with gRPC streaming
-
-### De-duplication System
-
-- ✅ LRU cache for transaction signatures
-- ✅ Avoid double-processing between live stream and confirmed blocks
-- ✅ Memory-efficient signature tracking
-- ✅ Configurable cache size via CLI
-
-## 🐛 Error Handling
-
-The scanner implements robust error handling:
-
-- **gRPC Connection Failures**: Automatic fallback to RPC-only mode when gRPC is unavailable
-- **Connection Resilience**: App continues running even if gRPC server is down or unreachable
-- **Block Processing Errors**: Skip problematic blocks and continue
-- **Transaction Parsing**: Graceful handling of malformed data
-- **Memory Management**: Automatic cleanup prevents memory leaks
-
-### gRPC Fallback Behavior
-
-When the application starts, it tests the gRPC connection:
-- ✅ **gRPC Available**: Runs in hybrid mode (RPC + gRPC) for optimal performance
-- ⚠️ **gRPC Unavailable**: Automatically falls back to RPC-only mode
-- 🔄 **gRPC Fails During Runtime**: Seamlessly continues with RPC polling without crashing
-
-This ensures your scanner keeps running regardless of gRPC server availability.
-
-## 🔧 Development
-
-### Running Tests
-
-```bash
-cargo test
-```
-
-### Code Formatting
-
-```bash
-cargo fmt
-```
-
-### Linting
-
-```bash
-cargo clippy
-```
-
-### Documentation
-
-```bash
-cargo doc --open
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## ⚠️ Disclaimer
-
-This tool is for educational and research purposes. Token trading involves significant risk. Always do your own research and never invest more than you can afford to lose.
-
-## Potential issues
-
-export CC=/opt/homebrew/opt/llvm/bin/clang
-export CXX=/opt/homebrew/opt/llvm/bin/clang++
+Contributions are welcome! Please feel free to submit a Pull Request. 
