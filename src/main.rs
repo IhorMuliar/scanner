@@ -340,34 +340,22 @@ impl SolanaBlockScanner {
                         continue;
                     }
                     
-                    // Check if the token is new (less than an hour old)
-                    match self.is_token_new(transaction).await {
-                        Ok(is_new) => {
-                            if is_new {
-                                // Only process and log if the token is new
-                                match self.process_single_transaction(transaction, processed_block, tx_index).await {
-                                    Ok(processed_tx) => {
-                                        info!("Found new token (<1 hour old) BUY transaction: {}", processed_tx.signature);
-                                        
-                                        // Extract mint address for clarity
-                                        if let Some(mint_address) = self.extract_mint_address_from_buy(transaction) {
-                                            info!("  Token Mint: {}", mint_address);
-                                        }
-                                        
-                                        info!("  Slot: {} Block: {}", processed_tx.slot, processed_tx.block_hash);
-                                        self.transactions_processed += 1;
-                                    }
-                                    Err(e) => {
-                                        debug!("Failed to process Pump.fun transaction in block {}: {}", 
-                                              processed_block.slot, e);
-                                    }
-                                }
-                            } else {
-                                debug!("Skipping BUY transaction for token older than 1 hour");
+                    // Process and log all successful Pump.fun BUY transactions
+                    match self.process_single_transaction(transaction, processed_block, tx_index).await {
+                        Ok(processed_tx) => {
+                            info!("Found Pump.fun BUY transaction: {}", processed_tx.signature);
+                            
+                            // Extract mint address for clarity
+                            if let Some(mint_address) = self.extract_mint_address_from_buy(transaction) {
+                                info!("  Token Mint: {}", mint_address);
                             }
+                            
+                            info!("  Slot: {} Block: {}", processed_tx.slot, processed_tx.block_hash);
+                            self.transactions_processed += 1;
                         }
                         Err(e) => {
-                            debug!("Error checking token age: {}", e);
+                            debug!("Failed to process Pump.fun transaction in block {}: {}", 
+                                  processed_block.slot, e);
                         }
                     }
                 }
@@ -679,131 +667,6 @@ impl SolanaBlockScanner {
         (self.blocks_processed, self.transactions_processed, self.processed_blocks.len())
     }
 
-    /// Check if a token is less than an hour old
-    ///
-    /// # Arguments
-    /// * `transaction` - The transaction containing the buy instruction
-    ///
-    /// # Returns
-    /// * `Result<bool>` - Whether the token is less than an hour old
-    async fn is_token_new(&self, transaction: &solana_transaction_status::EncodedTransactionWithStatusMeta) -> Result<bool> {
-        // Extract the mint account address from the buy instruction
-        let mint_address = match self.extract_mint_address_from_buy(transaction) {
-            Some(address) => address,
-            None => {
-                debug!("Could not extract mint address from buy transaction");
-                return Ok(false);
-            }
-        };
-        
-        debug!("Found mint address: {}", mint_address);
-        
-        // Fetch the mint account data using RPC
-        let mint_account = match tokio::task::spawn_blocking({
-            let client = Arc::clone(&self.rpc_client);
-            let mint_pubkey = mint_address.parse().context("Failed to parse mint address")?;
-            move || client.get_account(&mint_pubkey)
-        })
-        .await
-        .context("Task join error")?
-        {
-            Ok(account) => account,
-            Err(e) => {
-                debug!("Failed to fetch mint account {}: {}", mint_address, e);
-                return Ok(false);
-            }
-        };
-        
-        // Get current slot and timestamp to compare with
-        let current_slot = tokio::task::spawn_blocking({
-            let client = Arc::clone(&self.rpc_client);
-            move || client.get_slot()
-        })
-        .await
-        .context("Task join error")?
-        .context("Failed to get current slot")?;
-        
-        // Get current blockchain time
-        let current_time = tokio::task::spawn_blocking({
-            let client = Arc::clone(&self.rpc_client);
-            move || client.get_block_time(current_slot)
-        })
-        .await
-        .context("Task join error")?
-        .context("Failed to get block time")?;
-        
-        // Token age approach: Check account metadata and transaction history
-        
-        // 1. Check SPL token mint data to determine if it's a valid token mint account
-        // For SPL tokens, we could check the mint authority, supply, etc.
-        if mint_account.executable {
-            // Executable accounts can't be SPL token mints
-            return Ok(false);
-        }
-        
-        // SPL tokens should be owned by the Token Program
-        let spl_token_program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-        let spl_token_2022_program_id = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-        
-        if mint_account.owner.to_string() != spl_token_program_id && 
-           mint_account.owner.to_string() != spl_token_2022_program_id {
-            debug!("Account is not owned by token program");
-            return Ok(false);
-        }
-        
-        // 2. Get transaction history for this mint account to determine age
-        let signatures = tokio::task::spawn_blocking({
-            let client = Arc::clone(&self.rpc_client);
-            let mint_pubkey = mint_address.parse().context("Failed to parse mint address")?;
-            move || client.get_signatures_for_address(&mint_pubkey)
-        })
-        .await
-        .context("Task join error")?;
-        
-        match signatures {
-            Ok(signatures) => {
-                // If there are very few signatures (transactions), it's likely new
-                if !signatures.is_empty() {
-                    // Check timestamp of oldest signature, which should be the creation tx
-                    if let Some(oldest_tx) = signatures.last() {
-                        if let Some(block_time) = oldest_tx.block_time {
-                            // Calculate time difference in seconds
-                            let time_diff = current_time - block_time;
-                            
-                            // If less than an hour old (3600 seconds)
-                            if time_diff < 3600 {
-                                info!("Token is new: created {} seconds ago", time_diff);
-                                return Ok(true);
-                            } else {
-                                debug!("Token is {} seconds old (>1 hour)", time_diff);
-                                return Ok(false);
-                            }
-                        }
-                    }
-                }
-                
-                // If we reach here, we couldn't determine the age from transaction history
-                // As a fallback, check if the account data length is standard for SPL token
-                // and if the account has few transactions - this is a heuristic for new tokens
-                if signatures.len() <= 3 {
-                    // Typical SPL token mint has specific data length
-                    // This is a heuristic for new tokens that might have not indexed timestamps yet
-                    debug!("Token has very few transactions ({}), considering it new", signatures.len());
-                    return Ok(true);
-                }
-            }
-            Err(e) => {
-                debug!("Failed to get signatures for mint account: {}", e);
-                // If we can't get signatures, we might be rate limited or the account is very new
-                // In that case, assume it's new if we're looking at a buy transaction
-                return Ok(true);
-            }
-        }
-        
-        debug!("Token does not appear to be new (>1 hour old)");
-        Ok(false)
-    }
-    
     /// Extract the mint address from a buy transaction
     ///
     /// # Arguments
@@ -862,28 +725,6 @@ impl SolanaBlockScanner {
         }
         
         None
-    }
-
-    /// Log comprehensive Pump.fun transaction information to console
-    ///
-    /// # Arguments
-    /// * `tx` - The processed transaction to log
-    fn log_pump_fun_transaction(&self, tx: &ProcessedTransaction) {
-        // Only log buy transactions
-        if tx.pump_fun_instruction_type != Some(PumpFunInstructionType::Buy) {
-            return;
-        }
-        
-        // Check if the token is less than an hour old
-        // Note: We need to use tokio::spawn_blocking or spawn a task here
-        // since we're in a synchronous function but need to make async RPC calls
-        
-        // For now, we'll just add a placeholder for future implementation
-        // and log basic buy transaction information
-        
-        info!("Found BUY transaction: {}", tx.signature);
-        info!("  Checking if token is new (<1 hour)...");
-        debug!("  Will be checking mint account age in process_block_transactions");
     }
 }
 
