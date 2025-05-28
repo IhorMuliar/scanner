@@ -325,7 +325,18 @@ impl SolanaBlockScanner {
             if self.is_pump_fun_transaction(transaction) {
                 // Only process if it's a buy transaction
                 if self.has_instruction_type(transaction, &BUY_INSTRUCTION_DISCRIMINATOR) {
-                    // First check if the token is new (less than an hour old)
+                    // Check if the transaction was successful
+                    let is_successful = transaction.meta.as_ref()
+                        .map(|meta| meta.err.is_none())
+                        .unwrap_or(false);
+                    
+                    // Skip failed transactions
+                    if !is_successful {
+                        debug!("Skipping failed buy transaction");
+                        continue;
+                    }
+                    
+                    // Check if the token is new (less than an hour old)
                     match self.is_token_new(transaction).await {
                         Ok(is_new) => {
                             if is_new {
@@ -333,15 +344,6 @@ impl SolanaBlockScanner {
                                 match self.process_single_transaction(transaction, processed_block, tx_index).await {
                                     Ok(processed_tx) => {
                                         info!("Found new token (<1 hour old) BUY transaction: {}", processed_tx.signature);
-                                        // Log detailed transaction info
-                                        if processed_tx.is_successful {
-                                            info!("  Status: SUCCESS");
-                                        } else {
-                                            info!("  Status: FAILED");
-                                            if let Some(ref error) = processed_tx.error_message {
-                                                info!("  Error: {}", error);
-                                            }
-                                        }
                                         
                                         // Extract mint address for clarity
                                         if let Some(mint_address) = self.extract_mint_address_from_buy(transaction) {
