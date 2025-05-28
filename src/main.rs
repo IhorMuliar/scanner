@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use bs58;
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use dashmap::DashMap;
@@ -12,6 +13,13 @@ use tokio::time::{interval, sleep};
 
 /// Pump.fun program ID - the main program responsible for token creation and trading
 const PUMP_FUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+
+/// Instruction discriminators for Pump.fun program instructions
+const BUY_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
+const SELL_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
+const CREATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [24, 30, 200, 40, 5, 28, 7, 119];
+const MIGRATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [155, 234, 231, 146, 236, 158, 162, 30];
+const SET_CREATOR_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [254, 148, 255, 112, 207, 142, 170, 165];
 
 /// Solana Token Scanner - Monitor blockchain for new blocks and transactions
 #[derive(Parser, Debug)]
@@ -51,6 +59,17 @@ struct ProcessedBlock {
     processed_at: DateTime<Utc>,
 }
 
+/// Represents instruction type for a Pump.fun transaction
+#[derive(Debug, Clone, PartialEq)]
+enum PumpFunInstructionType {
+    Buy,
+    Sell,
+    Create,
+    Migrate,
+    SetCreator,
+    Other,
+}
+
 /// Represents a processed transaction with detailed information
 #[derive(Debug, Clone)]
 struct ProcessedTransaction {
@@ -76,6 +95,8 @@ struct ProcessedTransaction {
     recent_blockhash: String,
     /// Whether this transaction involves Pump.fun program
     is_pump_fun_transaction: bool,
+    /// Type of Pump.fun instruction if applicable
+    pump_fun_instruction_type: Option<PumpFunInstructionType>,
     /// Processing timestamp
     processed_at: DateTime<Utc>,
 }
@@ -370,6 +391,120 @@ impl SolanaBlockScanner {
         }
     }
 
+    /// Check if a transaction contains a specific Pump.fun instruction type
+    ///
+    /// # Arguments
+    /// * `transaction` - The transaction to check
+    /// * `discriminator` - The 8-byte instruction discriminator to look for
+    ///
+    /// # Returns
+    /// * `bool` - True if the transaction contains the specified instruction type
+    fn has_instruction_type(
+        &self, 
+        transaction: &solana_transaction_status::EncodedTransactionWithStatusMeta,
+        discriminator: &[u8; 8],
+    ) -> bool {
+        // Process instructions based on transaction type
+        match &transaction.transaction {
+            solana_transaction_status::EncodedTransaction::Json(ui_transaction) => {
+                match &ui_transaction.message {
+                    solana_transaction_status::UiMessage::Parsed(parsed_message) => {
+                        // For parsed messages, we need to check each instruction 
+                        // differently since they have a different structure
+                        for instruction in &parsed_message.instructions {
+                            // For parsed instructions, we need to get program_id and data
+                            // differently based on whether it's a parsed instruction or not
+                            let (program_id, data) = match instruction {
+                                solana_transaction_status::UiInstruction::Parsed(parsed_instruction) => {
+                                    // For parsed instructions, we don't have direct access to raw data
+                                    // Let's skip them for now and rely on the compiled instructions
+                                    continue;
+                                },
+                                solana_transaction_status::UiInstruction::Compiled(compiled) => {
+                                    // Get program ID from account keys and program_id_index
+                                    let program_idx = compiled.program_id_index as usize;
+                                    if program_idx >= parsed_message.account_keys.len() {
+                                        continue;
+                                    }
+
+                                    let program_id = &parsed_message.account_keys[program_idx].pubkey;
+                                    if program_id != PUMP_FUN_PROGRAM_ID {
+                                        continue;
+                                    }
+
+                                    (program_id, &compiled.data)
+                                }
+                            };
+
+                            // Now check the instruction data for the discriminator
+                            // Decode instruction data from base58
+                            if let Ok(decoded_data) = bs58::decode(data).into_vec() {
+                                // Check if data starts with our target discriminator
+                                if decoded_data.len() >= 8 && decoded_data[0..8] == discriminator[..] {
+                                    return true;
+                                }
+                            }
+                        }
+                        false
+                    },
+                    solana_transaction_status::UiMessage::Raw(raw_message) => {
+                        // Handle raw instructions
+                        for instruction in &raw_message.instructions {
+                            // For raw instructions, we need to map program_id index to the actual ID
+                            let program_id = if instruction.program_id_index < raw_message.account_keys.len() as u8 {
+                                &raw_message.account_keys[instruction.program_id_index as usize]
+                            } else {
+                                continue;
+                            };
+                            
+                            if program_id == PUMP_FUN_PROGRAM_ID {
+                                // Decode instruction data from base58
+                                if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+                                    // Check if data starts with our target discriminator
+                                    if data.len() >= 8 && data[0..8] == discriminator[..] {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                        false
+                    }
+                }
+            }
+            _ => return false,
+        }
+    }
+
+    /// Determine the Pump.fun instruction type for a transaction
+    ///
+    /// # Arguments
+    /// * `transaction` - The transaction to analyze
+    ///
+    /// # Returns
+    /// * `Option<PumpFunInstructionType>` - The instruction type if it's a Pump.fun transaction
+    fn determine_pump_fun_instruction_type(
+        &self,
+        transaction: &solana_transaction_status::EncodedTransactionWithStatusMeta,
+    ) -> Option<PumpFunInstructionType> {
+        if !self.is_pump_fun_transaction(transaction) {
+            return None;
+        }
+
+        if self.has_instruction_type(transaction, &BUY_INSTRUCTION_DISCRIMINATOR) {
+            Some(PumpFunInstructionType::Buy)
+        } else if self.has_instruction_type(transaction, &SELL_INSTRUCTION_DISCRIMINATOR) {
+            Some(PumpFunInstructionType::Sell)
+        } else if self.has_instruction_type(transaction, &CREATE_INSTRUCTION_DISCRIMINATOR) {
+            Some(PumpFunInstructionType::Create)
+        } else if self.has_instruction_type(transaction, &MIGRATE_INSTRUCTION_DISCRIMINATOR) {
+            Some(PumpFunInstructionType::Migrate)
+        } else if self.has_instruction_type(transaction, &SET_CREATOR_INSTRUCTION_DISCRIMINATOR) {
+            Some(PumpFunInstructionType::SetCreator)
+        } else {
+            Some(PumpFunInstructionType::Other)
+        }
+    }
+
     /// Process a single transaction and extract relevant information
     ///
     /// # Arguments
@@ -456,6 +591,11 @@ impl SolanaBlockScanner {
 
         // Check if this is a Pump.fun transaction and determine transaction type
         let is_pump_fun_transaction = account_keys.iter().any(|key| key == PUMP_FUN_PROGRAM_ID);
+        let pump_fun_instruction_type = if is_pump_fun_transaction {
+            self.determine_pump_fun_instruction_type(transaction)
+        } else {
+            None
+        };
 
         Ok(ProcessedTransaction {
             signature,
@@ -469,6 +609,7 @@ impl SolanaBlockScanner {
             account_keys,
             recent_blockhash,
             is_pump_fun_transaction,
+            pump_fun_instruction_type,
             processed_at: Utc::now(),
         })
     }
@@ -534,8 +675,19 @@ impl SolanaBlockScanner {
         // Create fee display (convert lamports to SOL for readability)
         let fee_sol = tx.fee as f64 / 1_000_000_000.0;
 
+        // Get transaction type string
+        let tx_type = match &tx.pump_fun_instruction_type {
+            Some(PumpFunInstructionType::Buy) => "BUY",
+            Some(PumpFunInstructionType::Sell) => "SELL",
+            Some(PumpFunInstructionType::Create) => "CREATE TOKEN",
+            Some(PumpFunInstructionType::Migrate) => "MIGRATE",
+            Some(PumpFunInstructionType::SetCreator) => "SET CREATOR",
+            Some(PumpFunInstructionType::Other) => "OTHER",
+            None => "UNKNOWN",
+        };
+
         // Log the transaction information with rich formatting specific to Pump.fun
-        info!("🚀 PUMP.FUN TRANSACTION DETECTED");
+        info!("🚀 PUMP.FUN TRANSACTION: {} OPERATION", tx_type);
         info!("  {} Status: {}", status_indicator, if tx.is_successful { "SUCCESS" } else { "FAILED" });
         info!("  📝 Signature: {}", tx.signature);
         info!("  📍 Slot: {}", tx.slot);
@@ -570,7 +722,7 @@ impl SolanaBlockScanner {
         }
         
         info!("  ⏰ Processed At: {}", tx.processed_at.format("%H:%M:%S%.3f"));
-        info!("  🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀");
+        info!("  ================================================");
     }
 }
 

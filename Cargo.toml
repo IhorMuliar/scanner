@@ -18,6 +18,7 @@ clap = { version = "4.0", features = ["derive"] }
 dashmap = "5.5"
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] } 
+bs58 = "0.5.1"
 # gRPC dependencies for Yellowstone Geyser integration
 # yellowstone-grpc-client = "=6.1.0"
 # yellowstone-grpc-proto = "=6.1.0"
