@@ -1,44 +1,630 @@
-use tokio::signal;
-use log::{error, info};
-use anyhow::Result;
+use std::sync::Arc;
+use std::time::Duration;
 
-mod config;
-mod scanner;
-mod utils;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use clap::Parser;
+use dashmap::DashMap;
+use log::{debug, error, info, warn};
+use solana_client::rpc_client::RpcClient;
+use solana_sdk::commitment_config::CommitmentConfig;
+use tokio::time::{interval, sleep};
 
-use crate::scanner::TokenScanner;
+/// Pump.fun program ID - the main program responsible for token creation and trading
+const PUMP_FUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize logger
-    env_logger::init();
-    
-    info!("🚀 Starting Solana Token Scanner (Rust)...");
-    
-    // Create scanner instance
-    let mut scanner = TokenScanner::new().await?;
-    
-    // Initialize scanner
-    scanner.initialize().await?;
-    
-    // Set up graceful shutdown
-    let scanner_clone = scanner.clone();
-    tokio::spawn(async move {
-        if let Err(e) = signal::ctrl_c().await {
-            error!("Failed to listen for ctrl-c: {}", e);
+/// Solana Token Scanner - Monitor blockchain for new blocks and transactions
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Solana RPC endpoint URL
+    #[arg(short, long, default_value = "https://api.mainnet-beta.solana.com")]
+    rpc_url: String,
+
+    /// Polling interval in seconds
+    #[arg(short, long, default_value_t = 1)]
+    interval: u64,
+
+    /// Starting slot number (0 for latest)
+    #[arg(short, long, default_value_t = 0)]
+    start_slot: u64,
+
+    /// Maximum number of blocks to process (0 for unlimited)
+    #[arg(short, long, default_value_t = 0)]
+    max_blocks: u64,
+}
+
+/// Represents a processed block with metadata
+#[derive(Debug, Clone)]
+struct ProcessedBlock {
+    /// Slot number of the block
+    slot: u64,
+    /// Block hash
+    blockhash: String,
+    /// Parent slot
+    parent_slot: u64,
+    /// Block timestamp
+    timestamp: Option<DateTime<Utc>>,
+    /// Number of transactions in block
+    transaction_count: usize,
+    /// Processing timestamp
+    processed_at: DateTime<Utc>,
+}
+
+/// Represents a processed transaction with detailed information
+#[derive(Debug, Clone)]
+struct ProcessedTransaction {
+    /// Transaction signature (unique identifier)
+    signature: String,
+    /// Slot number where transaction was included
+    slot: u64,
+    /// Block hash where transaction was included
+    block_hash: String,
+    /// Transaction success status
+    is_successful: bool,
+    /// Error message if transaction failed
+    error_message: Option<String>,
+    /// Number of instructions in the transaction
+    instruction_count: usize,
+    /// Compute units consumed by the transaction
+    compute_units_consumed: Option<u64>,
+    /// Fee paid for the transaction (in lamports)
+    fee: u64,
+    /// Accounts involved in the transaction
+    account_keys: Vec<String>,
+    /// Recent blockhash used by the transaction
+    recent_blockhash: String,
+    /// Whether this transaction involves Pump.fun program
+    is_pump_fun_transaction: bool,
+    /// Processing timestamp
+    processed_at: DateTime<Utc>,
+}
+
+/// Main scanner struct that manages the blockchain scanning process
+pub struct SolanaBlockScanner {
+    /// RPC client for connecting to Solana network (wrapped in Arc for sharing)
+    rpc_client: Arc<RpcClient>,
+    /// Cache to track processed blocks and avoid duplicates
+    processed_blocks: DashMap<u64, ProcessedBlock>,
+    /// Current slot being processed
+    current_slot: u64,
+    /// Configuration for polling interval
+    polling_interval: Duration,
+    /// Maximum blocks to process (0 for unlimited)
+    max_blocks: u64,
+    /// Counter for processed blocks
+    blocks_processed: u64,
+    /// Counter for processed transactions
+    transactions_processed: u64,
+}
+
+impl SolanaBlockScanner {
+    /// Create a new instance of the block scanner
+    ///
+    /// # Arguments
+    /// * `rpc_url` - The Solana RPC endpoint URL
+    /// * `start_slot` - Starting slot number (0 for latest)
+    /// * `polling_interval` - How often to poll for new blocks
+    /// * `max_blocks` - Maximum number of blocks to process
+    ///
+    /// # Returns
+    /// * `Result<Self>` - New scanner instance or error
+    pub async fn new(
+        rpc_url: String,
+        start_slot: u64,
+        polling_interval: Duration,
+        max_blocks: u64,
+    ) -> Result<Self> {
+        info!("🚀 Initializing Solana Transaction Scanner");
+        info!("📡 Connecting to RPC endpoint: {}", rpc_url);
+
+        // Initialize RPC client with confirmed commitment for reliability
+        let rpc_client = Arc::new(RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed()));
+
+        // Test connection by getting current slot (run in blocking task to avoid blocking async runtime)
+        let latest_slot = tokio::task::spawn_blocking({
+            let client = Arc::clone(&rpc_client);
+            move || client.get_slot()
+        })
+        .await
+        .context("Task join error")?
+        .context("Failed to connect to Solana RPC endpoint")?;
+
+        info!("✅ Successfully connected to Solana network");
+        info!("🔢 Latest confirmed slot: {}", latest_slot);
+
+        // Determine starting slot - use latest if 0 provided
+        let current_slot = if start_slot == 0 {
+            latest_slot
+        } else {
+            start_slot
+        };
+
+        info!("🎯 Starting scan from slot: {}", current_slot);
+
+        Ok(Self {
+            rpc_client,
+            processed_blocks: DashMap::new(),
+            current_slot,
+            polling_interval,
+            max_blocks,
+            blocks_processed: 0,
+            transactions_processed: 0,
+        })
+    }
+
+    /// Start the main scanning loop
+    ///
+    /// This method runs indefinitely, polling for new blocks and processing their transactions
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error if scanning fails
+    pub async fn start_scanning(&mut self) -> Result<()> {
+        info!("🔄 Starting blockchain transaction scanning loop");
+        info!(
+            "⏱️  Polling interval: {:?}",
+            self.polling_interval
+        );
+        
+        if self.max_blocks > 0 {
+            info!("🎯 Will process maximum {} blocks", self.max_blocks);
+        } else {
+            info!("♾️  Will process blocks indefinitely");
         }
-        info!("⚠️ Received SIGINT. Shutting down gracefully...");
-        scanner_clone.stop().await;
-    });
-    
-    // Start scanning
-    match scanner.start_scanning().await {
-        Ok(_) => info!("Scanner finished successfully"),
-        Err(e) => {
-            error!("❌ Fatal error: {}", e);
-            std::process::exit(1);
+
+        // Create interval timer for polling
+        let mut poll_timer = interval(self.polling_interval);
+
+        loop {
+            // Wait for next polling interval
+            poll_timer.tick().await;
+
+            // Check if we've reached the maximum block limit
+            if self.max_blocks > 0 && self.blocks_processed >= self.max_blocks {
+                info!("🎉 Reached maximum block limit ({}), stopping scanner", self.max_blocks);
+                break;
+            }
+
+            // Process the next block
+            match self.process_next_block().await {
+                Ok(processed) => {
+                    if processed {
+                        self.blocks_processed += 1;
+                        debug!("📈 Total blocks processed: {}", self.blocks_processed);
+                        debug!("🔄 Total transactions processed: {}", self.transactions_processed);
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Error processing block at slot {}: {}", self.current_slot, e);
+                    warn!("⏳ Waiting before retry...");
+                    sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+
+        info!("🏁 Scanning completed. Blocks processed: {}, Transactions processed: {}", 
+              self.blocks_processed, self.transactions_processed);
+        Ok(())
+    }
+
+    /// Process the next block in sequence
+    ///
+    /// # Returns
+    /// * `Result<bool>` - True if block was processed, False if block not yet available
+    async fn process_next_block(&mut self) -> Result<bool> {
+        // Check if block has already been processed
+        if self.processed_blocks.contains_key(&self.current_slot) {
+            debug!("⏭️  Block at slot {} already processed, skipping", self.current_slot);
+            self.current_slot += 1;
+            return Ok(false);
+        }
+
+        // Attempt to get block data from RPC (use spawn_blocking for sync RPC call)
+        debug!("🔍 Fetching block data for slot: {}", self.current_slot);
+        
+        let block_result = tokio::task::spawn_blocking({
+            let client = Arc::clone(&self.rpc_client);
+            let slot = self.current_slot;
+            move || {
+                client.get_block_with_config(
+                    slot,
+                    solana_client::rpc_config::RpcBlockConfig {
+                        encoding: Some(solana_transaction_status::UiTransactionEncoding::Json),
+                        transaction_details: Some(
+                            solana_transaction_status::TransactionDetails::Full,
+                        ),
+                        rewards: Some(false),
+                        commitment: Some(CommitmentConfig::confirmed()),
+                        max_supported_transaction_version: Some(0),
+                    },
+                )
+            }
+        })
+        .await
+        .context("Task join error")?;
+        
+        match block_result {
+            Ok(block) => {
+                // Successfully retrieved block, process it
+                let processed_block = self.create_processed_block(&block, self.current_slot)?;
+                
+                // Process all transactions in the block
+                self.process_block_transactions(&block, &processed_block).await?;
+                
+                // Cache the processed block
+                self.processed_blocks.insert(self.current_slot, processed_block);
+                
+                // Move to next slot
+                self.current_slot += 1;
+                Ok(true)
+            }
+            Err(e) => {
+                // Block might not be available yet or other error occurred
+                debug!("⏳ Block at slot {} not available yet: {}", self.current_slot, e);
+                
+                // Check if we need to skip ahead (block might be missing)
+                let latest_slot = tokio::task::spawn_blocking({
+                    let client = Arc::clone(&self.rpc_client);
+                    move || client.get_slot()
+                })
+                .await
+                .context("Task join error")?
+                .context("Failed to get latest slot")?;
+                
+                if self.current_slot < latest_slot.saturating_sub(100) {
+                    warn!("⚠️  Slot {} appears to be missing, skipping to next", self.current_slot);
+                    self.current_slot += 1;
+                }
+                
+                Ok(false)
+            }
         }
     }
-    
+
+    /// Process all transactions in a block
+    ///
+    /// # Arguments
+    /// * `block` - The block data from RPC
+    /// * `processed_block` - Metadata about the processed block
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error if transaction processing fails
+    async fn process_block_transactions(
+        &mut self,
+        block: &solana_transaction_status::UiConfirmedBlock,
+        processed_block: &ProcessedBlock,
+    ) -> Result<()> {
+        // Get transactions from the block
+        let transactions = match &block.transactions {
+            Some(txs) => txs,
+            None => {
+                debug!("📭 No transactions in block {}", processed_block.slot);
+                return Ok(());
+            }
+        };
+
+        info!("📦 Processing block {} with {} transactions", 
+              processed_block.slot, transactions.len());
+
+        let mut pump_fun_transactions = 0;
+
+        // Process each transaction and filter for Pump.fun transactions
+        for (tx_index, transaction) in transactions.iter().enumerate() {
+            // Check if this transaction involves Pump.fun program
+            if self.is_pump_fun_transaction(transaction) {
+                pump_fun_transactions += 1;
+                
+                match self.process_single_transaction(transaction, processed_block, tx_index).await {
+                    Ok(processed_tx) => {
+                        self.log_pump_fun_transaction(&processed_tx);
+                        self.transactions_processed += 1;
+                    }
+                    Err(e) => {
+                        warn!("⚠️  Failed to process Pump.fun transaction {} in block {}: {}", 
+                              tx_index, processed_block.slot, e);
+                    }
+                }
+            }
+        }
+
+        if pump_fun_transactions > 0 {
+            info!("🚀 Found {} Pump.fun transactions in block {}", 
+                  pump_fun_transactions, processed_block.slot);
+        } else {
+            debug!("🔍 No Pump.fun transactions found in block {}", processed_block.slot);
+        }
+
+        Ok(())
+    }
+
+    /// Check if a transaction involves the Pump.fun program
+    ///
+    /// # Arguments
+    /// * `transaction` - The transaction to check
+    ///
+    /// # Returns
+    /// * `bool` - True if the transaction involves Pump.fun program
+    fn is_pump_fun_transaction(
+        &self,
+        transaction: &solana_transaction_status::EncodedTransactionWithStatusMeta,
+    ) -> bool {
+        match &transaction.transaction {
+            solana_transaction_status::EncodedTransaction::Json(ui_transaction) => {
+                match &ui_transaction.message {
+                    solana_transaction_status::UiMessage::Parsed(parsed_message) => {
+                        // Check if Pump.fun program ID is in account keys
+                        parsed_message.account_keys.iter()
+                            .any(|key| key.pubkey == PUMP_FUN_PROGRAM_ID)
+                    }
+                    solana_transaction_status::UiMessage::Raw(raw_message) => {
+                        // Check if Pump.fun program ID is in account keys
+                        raw_message.account_keys.iter()
+                            .any(|key| key == PUMP_FUN_PROGRAM_ID)
+                    }
+                }
+            }
+            _ => {
+                // For non-JSON formats, we can't easily check, so return false
+                false
+            }
+        }
+    }
+
+    /// Process a single transaction and extract relevant information
+    ///
+    /// # Arguments
+    /// * `transaction` - The transaction data from the block
+    /// * `processed_block` - Metadata about the block containing this transaction
+    /// * `tx_index` - Index of the transaction within the block
+    ///
+    /// # Returns
+    /// * `Result<ProcessedTransaction>` - Processed transaction data or error
+    async fn process_single_transaction(
+        &self,
+        transaction: &solana_transaction_status::EncodedTransactionWithStatusMeta,
+        processed_block: &ProcessedBlock,
+        tx_index: usize,
+    ) -> Result<ProcessedTransaction> {
+        // Extract transaction signature (first signature is the transaction signature)
+        let signature = match &transaction.transaction {
+            solana_transaction_status::EncodedTransaction::Json(ui_transaction) => {
+                ui_transaction.signatures.first()
+                    .ok_or_else(|| anyhow::anyhow!("Transaction missing signature"))?
+                    .clone()
+            }
+            solana_transaction_status::EncodedTransaction::LegacyBinary(_) => {
+                return Err(anyhow::anyhow!("Legacy binary format not supported"));
+            }
+            solana_transaction_status::EncodedTransaction::Binary(_, _) => {
+                return Err(anyhow::anyhow!("Binary format not supported"));
+            }
+            solana_transaction_status::EncodedTransaction::Accounts(_) => {
+                return Err(anyhow::anyhow!("Accounts format not supported"));
+            }
+        };
+
+        // Determine if transaction was successful
+        let is_successful = transaction.meta.as_ref()
+            .map(|meta| meta.err.is_none())
+            .unwrap_or(false);
+
+        // Extract error message if transaction failed
+        let error_message = transaction.meta.as_ref()
+            .and_then(|meta| meta.err.as_ref())
+            .map(|err| format!("{:?}", err));
+
+        // Extract fee information
+        let fee = transaction.meta.as_ref()
+            .map(|meta| meta.fee)
+            .unwrap_or(0);
+
+        // Extract compute units consumed (handle OptionSerializer)
+        let compute_units_consumed = transaction.meta.as_ref()
+            .and_then(|meta| {
+                match &meta.compute_units_consumed {
+                    solana_transaction_status::option_serializer::OptionSerializer::Some(units) => Some(*units),
+                    solana_transaction_status::option_serializer::OptionSerializer::None => None,
+                    solana_transaction_status::option_serializer::OptionSerializer::Skip => None,
+                }
+            });
+
+        // Extract account keys and recent blockhash from transaction message
+        let (account_keys, recent_blockhash, instruction_count) = match &transaction.transaction {
+            solana_transaction_status::EncodedTransaction::Json(ui_transaction) => {
+                match &ui_transaction.message {
+                    solana_transaction_status::UiMessage::Parsed(parsed_message) => {
+                        let account_keys = parsed_message.account_keys.iter()
+                            .map(|key| key.pubkey.clone())
+                            .collect();
+                        let recent_blockhash = parsed_message.recent_blockhash.clone();
+                        let instruction_count = parsed_message.instructions.len();
+                        (account_keys, recent_blockhash, instruction_count)
+                    }
+                    solana_transaction_status::UiMessage::Raw(raw_message) => {
+                        let account_keys = raw_message.account_keys.clone();
+                        let recent_blockhash = raw_message.recent_blockhash.clone();
+                        let instruction_count = raw_message.instructions.len();
+                        (account_keys, recent_blockhash, instruction_count)
+                    }
+                }
+            }
+            _ => {
+                // For non-JSON formats, provide defaults
+                (vec![], format!("unknown_{}", tx_index), 0)
+            }
+        };
+
+        // Check if this is a Pump.fun transaction and determine transaction type
+        let is_pump_fun_transaction = account_keys.iter().any(|key| key == PUMP_FUN_PROGRAM_ID);
+
+        Ok(ProcessedTransaction {
+            signature,
+            slot: processed_block.slot,
+            block_hash: processed_block.blockhash.clone(),
+            is_successful,
+            error_message,
+            instruction_count,
+            compute_units_consumed,
+            fee,
+            account_keys,
+            recent_blockhash,
+            is_pump_fun_transaction,
+            processed_at: Utc::now(),
+        })
+    }
+
+    /// Create a ProcessedBlock from RPC block data
+    ///
+    /// # Arguments
+    /// * `block` - Block data from RPC
+    /// * `slot` - Slot number
+    ///
+    /// # Returns
+    /// * `Result<ProcessedBlock>` - Processed block metadata
+    fn create_processed_block(
+        &self,
+        block: &solana_transaction_status::UiConfirmedBlock,
+        slot: u64,
+    ) -> Result<ProcessedBlock> {
+        // Extract block timestamp if available
+        let timestamp = block.block_time.map(|ts| {
+            DateTime::from_timestamp(ts, 0)
+                .unwrap_or_else(|| Utc::now())
+        });
+
+        // Get transaction count
+        let transaction_count = block.transactions.as_ref()
+            .map(|txs| txs.len())
+            .unwrap_or(0);
+
+        // Create processed block record
+        let processed_block = ProcessedBlock {
+            slot,
+            blockhash: block.blockhash.clone(),
+            parent_slot: block.parent_slot,
+            timestamp,
+            transaction_count,
+            processed_at: Utc::now(),
+        };
+
+        debug!("✅ Created processed block record for slot {}", slot);
+        Ok(processed_block)
+    }
+
+    /// Get statistics about the scanning process
+    ///
+    /// # Returns
+    /// * Statistics about processed blocks and transactions
+    pub fn get_stats(&self) -> (u64, u64, usize) {
+        (self.blocks_processed, self.transactions_processed, self.processed_blocks.len())
+    }
+
+    /// Log comprehensive Pump.fun transaction information to console
+    ///
+    /// # Arguments
+    /// * `tx` - The processed transaction to log
+    fn log_pump_fun_transaction(&self, tx: &ProcessedTransaction) {
+        // Create status indicator
+        let status_indicator = if tx.is_successful {
+            "✅"
+        } else {
+            "❌"
+        };
+
+        // Create fee display (convert lamports to SOL for readability)
+        let fee_sol = tx.fee as f64 / 1_000_000_000.0;
+
+        // Log the transaction information with rich formatting specific to Pump.fun
+        info!("🚀 PUMP.FUN TRANSACTION DETECTED");
+        info!("  {} Status: {}", status_indicator, if tx.is_successful { "SUCCESS" } else { "FAILED" });
+        info!("  📝 Signature: {}", tx.signature);
+        info!("  📍 Slot: {}", tx.slot);
+        info!("  🔗 Block: {}", tx.block_hash);
+        info!("  🧾 Instructions: {}", tx.instruction_count);
+        info!("  💰 Fee: {} SOL ({} lamports)", fee_sol, tx.fee);
+        
+        if let Some(compute_units) = tx.compute_units_consumed {
+            info!("  ⚡ Compute Units: {}", compute_units);
+        }
+        
+        info!("  👥 Accounts: {}", tx.account_keys.len());
+        info!("  🔑 Recent Blockhash: {}", tx.recent_blockhash);
+        
+        // Show some account keys involved (first few for brevity)
+        if !tx.account_keys.is_empty() {
+            info!("  📋 Key Accounts:");
+            for (i, account) in tx.account_keys.iter().take(5).enumerate() {
+                if account == PUMP_FUN_PROGRAM_ID {
+                    info!("    {}. {} 🚀 (PUMP.FUN PROGRAM)", i + 1, account);
+                } else {
+                    info!("    {}. {}", i + 1, account);
+                }
+            }
+            if tx.account_keys.len() > 5 {
+                info!("    ... and {} more accounts", tx.account_keys.len() - 5);
+            }
+        }
+        
+        if let Some(ref error) = tx.error_message {
+            info!("  ⚠️  Error: {}", error);
+        }
+        
+        info!("  ⏰ Processed At: {}", tx.processed_at.format("%H:%M:%S%.3f"));
+        info!("  🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀➖🚀");
+    }
+}
+
+/// Main application entry point
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Load environment variables from .env file if present
+    dotenv::dotenv().ok();
+
+    // Initialize logging system
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .format_timestamp_millis()
+        .init();
+
+    // Parse command line arguments
+    let args = Args::parse();
+
+    info!("🌟 Starting Solana Pump.fun Transaction Scanner v{}", env!("CARGO_PKG_VERSION"));
+    info!("🚀 This scanner specifically monitors Pump.fun transactions (Program ID: {})", PUMP_FUN_PROGRAM_ID);
+    info!("🔧 Configuration:");
+    info!("  📡 RPC URL: {}", args.rpc_url);
+    info!("  ⏱️  Polling Interval: {}s", args.interval);
+    info!("  🎯 Start Slot: {}", if args.start_slot == 0 { "latest".to_string() } else { args.start_slot.to_string() });
+    info!("  🔢 Max Blocks: {}", if args.max_blocks == 0 { "unlimited".to_string() } else { args.max_blocks.to_string() });
+
+    // Create and start the scanner
+    let mut scanner = SolanaBlockScanner::new(
+        args.rpc_url,
+        args.start_slot,
+        Duration::from_secs(args.interval),
+        args.max_blocks,
+    )
+    .await
+    .context("Failed to initialize transaction scanner")?;
+
+    // Handle graceful shutdown on Ctrl+C
+    tokio::select! {
+        result = scanner.start_scanning() => {
+            match result {
+                Ok(()) => info!("✅ Scanner completed successfully"),
+                Err(e) => error!("❌ Scanner failed: {}", e),
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("🛑 Received interrupt signal, shutting down gracefully...");
+            let (blocks_processed, transactions_processed, cached_blocks) = scanner.get_stats();
+            info!("📊 Final Statistics:");
+            info!("  🧱 Blocks Processed: {}", blocks_processed);
+            info!("  🚀 Pump.fun Transactions Found: {}", transactions_processed);
+            info!("  💾 Cached Blocks: {}", cached_blocks);
+        }
+    }
+
+    info!("👋 Solana Pump.fun Transaction Scanner shutdown complete");
     Ok(())
 } 
