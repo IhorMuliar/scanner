@@ -44,6 +44,18 @@ struct Args {
     /// Maximum number of blocks to process (0 for unlimited)
     #[arg(short, long, default_value_t = 0)]
     max_blocks: u64,
+    
+    /// Minimum SOL amount spent for a token to be considered "hot"
+    #[arg(long, default_value_t = 5.0)]
+    hot_sol_threshold: f64,
+    
+    /// Minimum number of buys for a token to be considered "hot"
+    #[arg(long, default_value_t = 5)]
+    hot_buys_threshold: u64,
+    
+    /// Time window in seconds for considering transactions (3600 = 1 hour)
+    #[arg(long, default_value_t = 3600)]
+    hot_time_window: u64,
 }
 
 /// Represents a processed block with metadata
@@ -72,6 +84,174 @@ enum PumpFunInstructionType {
     Migrate,
     SetCreator,
     Other,
+}
+
+/// Records a single token buy transaction 
+#[derive(Debug, Clone)]
+struct TokenTransaction {
+    /// Transaction signature
+    signature: String,
+    /// Amount of SOL spent in the transaction
+    sol_amount: f64,
+    /// When the transaction occurred
+    timestamp: DateTime<Utc>,
+}
+
+/// Data for tracking a specific token's activity
+#[derive(Debug)]
+struct TokenData {
+    /// Token mint address
+    mint_address: String,
+    /// Total SOL spent on this token
+    total_sol_spent: f64,
+    /// Number of buy transactions for this token
+    buy_count: u64,
+    /// Whether this token has been identified as "hot"
+    is_hot: bool,
+    /// When the token was first seen
+    first_seen: DateTime<Utc>,
+    /// When the token was last seen
+    last_seen: DateTime<Utc>,
+    /// Record of all transactions for this token
+    transactions: Vec<TokenTransaction>,
+}
+
+/// Tracks token buy activity to detect "hot" tokens
+#[derive(Debug)]
+struct TokenTracker {
+    /// Map of token mint addresses to their tracking data
+    token_data: DashMap<String, TokenData>,
+    /// Minimum SOL threshold for a token to be considered "hot"
+    min_sol_threshold: f64,
+    /// Minimum number of buys for a token to be considered "hot"
+    min_buys_threshold: u64,
+    /// Time window for tracking (in seconds)
+    tracking_window: i64,
+}
+
+impl TokenTracker {
+    /// Create a new token tracker with specified thresholds
+    pub fn new(min_sol_threshold: f64, min_buys_threshold: u64, tracking_window_seconds: i64) -> Self {
+        info!("Initializing hot token tracker:");
+        info!("  SOL threshold: {:.2} SOL", min_sol_threshold);
+        info!("  Buy count threshold: {}", min_buys_threshold);
+        info!("  Tracking window: {}s", tracking_window_seconds);
+        
+        Self {
+            token_data: DashMap::new(),
+            min_sol_threshold,
+            min_buys_threshold,
+            tracking_window: tracking_window_seconds,
+        }
+    }
+    
+    /// Record a new buy transaction for a token
+    pub fn record_transaction(&self, mint: String, signature: String, sol_amount: f64, timestamp: DateTime<Utc>) {
+        debug!("Recording transaction for token {}: {:.4} SOL", mint, sol_amount);
+        
+        let mut is_new_hot = false;
+        
+        // Use entry API to atomically update or insert
+        self.token_data.entry(mint.clone()).and_modify(|data| {
+            // Update existing token data
+            data.total_sol_spent += sol_amount;
+            data.buy_count += 1;
+            data.last_seen = timestamp;
+            data.transactions.push(TokenTransaction {
+                signature: signature.clone(),
+                sol_amount,
+                timestamp,
+            });
+            
+            // Check if token is now hot but wasn't before
+            if !data.is_hot && 
+               data.total_sol_spent > self.min_sol_threshold && 
+               data.buy_count >= self.min_buys_threshold {
+                data.is_hot = true;
+                is_new_hot = true;
+            }
+        }).or_insert_with(|| {
+            // Create new token data
+            TokenData {
+                mint_address: mint.clone(),
+                total_sol_spent: sol_amount,
+                buy_count: 1,
+                is_hot: false, // New tokens aren't hot yet
+                first_seen: timestamp,
+                last_seen: timestamp,
+                transactions: vec![TokenTransaction {
+                    signature,
+                    sol_amount,
+                    timestamp,
+                }],
+            }
+        });
+        
+        // If this was a modification that made the token hot, we need to check again
+        // since we can't return the is_new_hot value from the and_modify closure
+        if is_new_hot {
+            if let Some(data) = self.token_data.get(&mint) {
+                info!("🔥 HOT TOKEN DETECTED: {}", mint);
+                info!("  Total SOL spent: {:.2} SOL", data.total_sol_spent);
+                info!("  Buy count: {}", data.buy_count);
+                info!("  First seen: {}", data.first_seen);
+                info!("  Age: {}s", (timestamp - data.first_seen).num_seconds());
+            }
+        }
+    }
+    
+    /// Clean up old tokens from memory
+    pub fn cleanup_old_tokens(&self) -> usize {
+        let now = Utc::now();
+        let mut to_remove = Vec::new();
+        
+        // Find tokens to remove
+        for entry in self.token_data.iter() {
+            let token_data = entry.value();
+            let age_seconds = (now - token_data.last_seen).num_seconds();
+            
+            // Keep hot tokens longer than non-hot tokens
+            let max_age = if token_data.is_hot {
+                self.tracking_window * 3 // Keep hot tokens 3x longer
+            } else {
+                self.tracking_window
+            };
+            
+            if age_seconds > max_age {
+                to_remove.push(token_data.mint_address.clone());
+            }
+        }
+        
+        // Remove the tokens
+        for mint in &to_remove {
+            self.token_data.remove(mint);
+        }
+        
+        let count = to_remove.len();
+        if count > 0 {
+            debug!("Cleaned up {} old tokens from memory", count);
+        }
+        
+        count
+    }
+    
+    /// Get statistics about tracked tokens
+    pub fn get_stats(&self) -> (usize, usize) {
+        let total_tokens = self.token_data.len();
+        let hot_tokens = self.token_data.iter()
+            .filter(|entry| entry.value().is_hot)
+            .count();
+        
+        (total_tokens, hot_tokens)
+    }
+    
+    /// Get list of hot tokens
+    pub fn get_hot_tokens(&self) -> Vec<String> {
+        self.token_data.iter()
+            .filter(|entry| entry.value().is_hot)
+            .map(|entry| entry.value().mint_address.clone())
+            .collect()
+    }
 }
 
 /// Represents a processed transaction with detailed information
@@ -121,6 +301,8 @@ pub struct SolanaBlockScanner {
     blocks_processed: u64,
     /// Counter for processed transactions
     transactions_processed: u64,
+    /// Token tracker for hot token detection
+    token_tracker: TokenTracker,
 }
 
 impl SolanaBlockScanner {
@@ -167,6 +349,10 @@ impl SolanaBlockScanner {
 
         info!("🎯 Starting scan from slot: {}", current_slot);
 
+        // Initialize token tracker with default hot token thresholds
+        // 5 SOL in 5 buys within 1 hour (3600 seconds) makes a token "hot"
+        let token_tracker = TokenTracker::new(5.0, 5, 3600);
+
         Ok(Self {
             rpc_client,
             processed_blocks: DashMap::new(),
@@ -175,6 +361,7 @@ impl SolanaBlockScanner {
             max_blocks,
             blocks_processed: 0,
             transactions_processed: 0,
+            token_tracker,
         })
     }
 
@@ -195,35 +382,69 @@ impl SolanaBlockScanner {
 
         // Create interval timer for polling
         let mut poll_timer = interval(self.polling_interval);
+        
+        // Create interval timer for cleaning up old tokens (every 5 minutes)
+        let mut cleanup_timer = interval(Duration::from_secs(300));
 
         loop {
-            // Wait for next polling interval
-            poll_timer.tick().await;
+            tokio::select! {
+                // Handle polling for new blocks
+                _ = poll_timer.tick() => {
+                    // Check if we've reached the maximum block limit
+                    if self.max_blocks > 0 && self.blocks_processed >= self.max_blocks {
+                        info!("Reached maximum block limit ({}), stopping scanner", self.max_blocks);
+                        break;
+                    }
 
-            // Check if we've reached the maximum block limit
-            if self.max_blocks > 0 && self.blocks_processed >= self.max_blocks {
-                info!("Reached maximum block limit ({}), stopping scanner", self.max_blocks);
-                break;
-            }
-
-            // Process the next block
-            match self.process_next_block().await {
-                Ok(processed) => {
-                    if processed {
-                        self.blocks_processed += 1;
-                        debug!("Total blocks processed: {}", self.blocks_processed);
-                        debug!("Total transactions processed: {}", self.transactions_processed);
+                    // Process the next block
+                    match self.process_next_block().await {
+                        Ok(processed) => {
+                            if processed {
+                                self.blocks_processed += 1;
+                                debug!("Total blocks processed: {}", self.blocks_processed);
+                                debug!("Total transactions processed: {}", self.transactions_processed);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error processing block at slot {}: {}", self.current_slot, e);
+                            sleep(Duration::from_secs(5)).await;
+                        }
                     }
                 }
-                Err(e) => {
-                    error!("Error processing block at slot {}: {}", self.current_slot, e);
-                    sleep(Duration::from_secs(5)).await;
+                
+                // Handle cleanup of old tokens
+                _ = cleanup_timer.tick() => {
+                    let removed = self.token_tracker.cleanup_old_tokens();
+                    if removed > 0 {
+                        info!("Cleaned up {} inactive tokens from memory", removed);
+                    }
+                    
+                    // Log current token tracker stats
+                    let (total_tokens, hot_tokens) = self.token_tracker.get_stats();
+                    info!("Token tracker stats: {} tokens tracked, {} hot tokens", total_tokens, hot_tokens);
+                    
+                    // If there are hot tokens, list them
+                    if hot_tokens > 0 {
+                        let hot_token_list = self.token_tracker.get_hot_tokens();
+                        info!("Current hot tokens: {}", hot_token_list.join(", "));
+                    }
+                }
+                
+                // Handle graceful shutdown on Ctrl+C
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received interrupt signal, shutting down gracefully...");
+                    break;
                 }
             }
         }
 
         info!("Scanning completed. Blocks processed: {}, Transactions processed: {}", 
               self.blocks_processed, self.transactions_processed);
+              
+        // Log final token tracker stats
+        let (total_tokens, hot_tokens) = self.token_tracker.get_stats();
+        info!("Final token tracker stats: {} tokens tracked, {} hot tokens", total_tokens, hot_tokens);
+        
         Ok(())
     }
 
@@ -345,9 +566,22 @@ impl SolanaBlockScanner {
                         Ok(processed_tx) => {
                             info!("Found Pump.fun BUY transaction: {}", processed_tx.signature);
                             
-                            // Extract mint address for clarity
+                            // Extract mint address for tracking
                             if let Some(mint_address) = self.extract_mint_address_from_buy(transaction) {
                                 info!("  Token Mint: {}", mint_address);
+                                
+                                // Extract SOL amount spent
+                                if let Some(sol_amount) = self.extract_sol_amount_from_buy(transaction) {
+                                    info!("  SOL Spent: {:.4} SOL", sol_amount);
+                                    
+                                    // Record this transaction for hot token tracking
+                                    self.token_tracker.record_transaction(
+                                        mint_address,
+                                        processed_tx.signature.clone(),
+                                        sol_amount,
+                                        processed_tx.processed_at
+                                    );
+                                }
                             }
                             
                             info!("  Slot: {} Block: {}", processed_tx.slot, processed_tx.block_hash);
@@ -726,6 +960,81 @@ impl SolanaBlockScanner {
         
         None
     }
+
+    /// Extract the SOL amount spent in a buy transaction
+    ///
+    /// # Arguments
+    /// * `transaction` - The transaction containing the buy instruction
+    ///
+    /// # Returns
+    /// * `Option<f64>` - The SOL amount spent if it can be determined
+    fn extract_sol_amount_from_buy(&self, transaction: &solana_transaction_status::EncodedTransactionWithStatusMeta) -> Option<f64> {
+        // We need transaction metadata to get balances
+        let meta = transaction.meta.as_ref()?;
+        
+        // Try to find buyer account index
+        let mut buyer_index: Option<usize> = None;
+        
+        // Extract buyer account index from transaction
+        match &transaction.transaction {
+            solana_transaction_status::EncodedTransaction::Json(ui_transaction) => {
+                match &ui_transaction.message {
+                    solana_transaction_status::UiMessage::Parsed(parsed_message) => {
+                        // For parsed messages, check each instruction
+                        for instruction in &parsed_message.instructions {
+                            match instruction {
+                                solana_transaction_status::UiInstruction::Compiled(compiled) => {
+                                    if let Ok(data) = bs58::decode(&compiled.data).into_vec() {
+                                        if data.len() >= 8 && data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
+                                            // Buyer is typically the first account in the accounts list
+                                            if !compiled.accounts.is_empty() {
+                                                buyer_index = Some(compiled.accounts[0] as usize);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                },
+                                _ => continue,
+                            }
+                        }
+                    },
+                    solana_transaction_status::UiMessage::Raw(raw_message) => {
+                        // For raw messages, check each instruction
+                        for instruction in &raw_message.instructions {
+                            if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+                                if data.len() >= 8 && data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
+                                    // Buyer is typically the first account in the accounts list
+                                    if !instruction.accounts.is_empty() {
+                                        buyer_index = Some(instruction.accounts[0] as usize);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            _ => {}
+        };
+        
+        // If we found a buyer index, calculate SOL spent
+        if let Some(idx) = buyer_index {
+            if idx < meta.pre_balances.len() && idx < meta.post_balances.len() {
+                let pre_balance = meta.pre_balances[idx];
+                let post_balance = meta.post_balances[idx];
+                
+                // Calculate difference and convert from lamports to SOL
+                if pre_balance > post_balance {
+                    let lamports_spent = pre_balance - post_balance;
+                    let sol_spent = lamports_spent as f64 / 1_000_000_000.0; // Convert lamports to SOL
+                    return Some(sol_spent);
+                }
+            }
+        }
+        
+        // Fallback to transaction fee if we couldn't determine the spent amount
+        Some(meta.fee as f64 / 1_000_000_000.0)
+    }
 }
 
 /// Main application entry point
@@ -757,8 +1066,12 @@ async fn main() -> Result<()> {
     info!("  Polling Interval: {}ms", polling_interval_ms);
     info!("  Start Slot: {}", if args.start_slot == 0 { "latest".to_string() } else { args.start_slot.to_string() });
     info!("  Max Blocks: {}", if args.max_blocks == 0 { "unlimited".to_string() } else { args.max_blocks.to_string() });
+    info!("Hot Token Detection:");
+    info!("  SOL Threshold: {:.2} SOL", args.hot_sol_threshold);
+    info!("  Buy Count Threshold: {}", args.hot_buys_threshold);
+    info!("  Time Window: {}s", args.hot_time_window);
 
-    // Create and start the scanner
+    // Create the scanner (original code uses the same RPC URL, polling interval, etc.)
     let mut scanner = SolanaBlockScanner::new(
         args.rpc_url,
         args.start_slot,
@@ -767,6 +1080,13 @@ async fn main() -> Result<()> {
     )
     .await
     .context("Failed to initialize transaction scanner")?;
+    
+    // Override the default token tracker with the configured values
+    scanner.token_tracker = TokenTracker::new(
+        args.hot_sol_threshold,
+        args.hot_buys_threshold,
+        args.hot_time_window as i64
+    );
 
     // Handle graceful shutdown on Ctrl+C
     tokio::select! {
@@ -783,6 +1103,17 @@ async fn main() -> Result<()> {
             info!("  Blocks Processed: {}", blocks_processed);
             info!("  Pump.fun Transactions Found: {}", transactions_processed);
             info!("  Cached Blocks: {}", cached_blocks);
+            
+            // Add hot token stats
+            let (total_tokens, hot_tokens) = scanner.token_tracker.get_stats();
+            info!("  Tokens Tracked: {}", total_tokens);
+            info!("  Hot Tokens: {}", hot_tokens);
+            
+            // List hot tokens if any
+            if hot_tokens > 0 {
+                let hot_token_list = scanner.token_tracker.get_hot_tokens();
+                info!("Hot tokens: {}", hot_token_list.join(", "));
+            }
         }
     }
 
