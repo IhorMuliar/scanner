@@ -32,6 +32,10 @@ struct Args {
     /// Polling interval in seconds
     #[arg(short, long, default_value_t = 1)]
     interval: u64,
+    
+    /// Polling interval in milliseconds (overrides interval if specified)
+    #[arg(short = 'f', long, default_value_t = 0)]
+    interval_ms: u64,
 
     /// Starting slot number (0 for latest)
     #[arg(short, long, default_value_t = 0)]
@@ -898,11 +902,18 @@ async fn main() -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
 
+    // Determine polling interval in milliseconds
+    let polling_interval_ms = if args.interval_ms > 0 {
+        args.interval_ms
+    } else {
+        args.interval * 1000
+    };
+
     info!("Starting Solana Pump.fun Transaction Scanner v{}", env!("CARGO_PKG_VERSION"));
     info!("This scanner specifically monitors Pump.fun transactions");
     info!("Configuration:");
     info!("  RPC URL: {}", args.rpc_url);
-    info!("  Polling Interval: {}s", args.interval);
+    info!("  Polling Interval: {}ms", polling_interval_ms);
     info!("  Start Slot: {}", if args.start_slot == 0 { "latest".to_string() } else { args.start_slot.to_string() });
     info!("  Max Blocks: {}", if args.max_blocks == 0 { "unlimited".to_string() } else { args.max_blocks.to_string() });
 
@@ -910,7 +921,7 @@ async fn main() -> Result<()> {
     let mut scanner = SolanaBlockScanner::new(
         args.rpc_url,
         args.start_slot,
-        Duration::from_secs(args.interval),
+        Duration::from_millis(polling_interval_ms),
         args.max_blocks,
     )
     .await
