@@ -86,15 +86,17 @@ enum PumpFunInstructionType {
     Other,
 }
 
-/// Records a single token buy transaction 
+/// Records a single token transaction (buy or migrate)
 #[derive(Debug, Clone)]
 struct TokenTransaction {
     /// Transaction signature
     signature: String,
-    /// Amount of SOL spent in the transaction
+    /// Amount of SOL spent in the transaction (0 for migrate transactions)
     sol_amount: f64,
     /// When the transaction occurred
     timestamp: DateTime<Utc>,
+    /// Type of transaction (buy, create, migrate, etc.)
+    transaction_type: PumpFunInstructionType,
 }
 
 /// Data for tracking a specific token's activity
@@ -106,12 +108,18 @@ struct TokenData {
     total_sol_spent: f64,
     /// Number of buy transactions for this token
     buy_count: u64,
+    /// Number of migrate transactions for this token
+    migrate_count: u64,
     /// Whether this token has been identified as "hot"
     is_hot: bool,
+    /// Whether this token has been migrated to Raydium
+    is_migrated: bool,
     /// When the token was first seen
     first_seen: DateTime<Utc>,
     /// When the token was last seen
     last_seen: DateTime<Utc>,
+    /// When the token was migrated (if applicable)
+    migrated_at: Option<DateTime<Utc>>,
     /// Record of all transactions for this token
     transactions: Vec<TokenTransaction>,
 }
@@ -145,22 +153,39 @@ impl TokenTracker {
         }
     }
     
-    /// Record a new buy transaction for a token
-    pub fn record_transaction(&self, mint: String, signature: String, sol_amount: f64, timestamp: DateTime<Utc>) {
-        debug!("Recording transaction for token {}: {:.4} SOL", mint, sol_amount);
+    /// Record a new transaction for a token (buy, create, or migrate)
+    pub fn record_transaction(&self, mint: String, signature: String, sol_amount: f64, timestamp: DateTime<Utc>, transaction_type: PumpFunInstructionType) {
+        debug!("Recording {} transaction for token {}: {:.4} SOL", 
+               format!("{:?}", transaction_type), mint, sol_amount);
         
         let mut is_new_hot = false;
+        let mut is_new_migrate = false;
         
         // Use entry API to atomically update or insert
         self.token_data.entry(mint.clone()).and_modify(|data| {
             // Update existing token data
             data.total_sol_spent += sol_amount;
-            data.buy_count += 1;
             data.last_seen = timestamp;
+            
+            // Update counters based on transaction type
+            match transaction_type {
+                PumpFunInstructionType::Buy | PumpFunInstructionType::Create => {
+                    data.buy_count += 1;
+                }
+                PumpFunInstructionType::Migrate => {
+                    data.migrate_count += 1;
+                    data.is_migrated = true;
+                    data.migrated_at = Some(timestamp);
+                    is_new_migrate = !data.transactions.iter().any(|tx| tx.transaction_type == PumpFunInstructionType::Migrate);
+                }
+                _ => {}
+            }
+            
             data.transactions.push(TokenTransaction {
                 signature: signature.clone(),
                 sol_amount,
                 timestamp,
+                transaction_type: transaction_type.clone(),
             });
             
             // Check if token is now hot but wasn't before
@@ -172,23 +197,42 @@ impl TokenTracker {
             }
         }).or_insert_with(|| {
             // Create new token data
-            TokenData {
+            let mut new_data = TokenData {
                 mint_address: mint.clone(),
                 total_sol_spent: sol_amount,
-                buy_count: 1,
+                buy_count: 0,
+                migrate_count: 0,
                 is_hot: false, // New tokens aren't hot yet
+                is_migrated: false,
                 first_seen: timestamp,
                 last_seen: timestamp,
+                migrated_at: None,
                 transactions: vec![TokenTransaction {
                     signature,
                     sol_amount,
                     timestamp,
+                    transaction_type: transaction_type.clone(),
                 }],
+            };
+            
+            // Set initial counters based on transaction type
+            match transaction_type {
+                PumpFunInstructionType::Buy | PumpFunInstructionType::Create => {
+                    new_data.buy_count = 1;
+                }
+                PumpFunInstructionType::Migrate => {
+                    new_data.migrate_count = 1;
+                    new_data.is_migrated = true;
+                    new_data.migrated_at = Some(timestamp);
+                    is_new_migrate = true;
+                }
+                _ => {}
             }
+            
+            new_data
         });
         
-        // If this was a modification that made the token hot, we need to check again
-        // since we can't return the is_new_hot value from the and_modify closure
+        // Log new hot tokens
         if is_new_hot {
             if let Some(data) = self.token_data.get(&mint) {
                 info!("🔥 HOT TOKEN DETECTED: {}", mint);
@@ -196,6 +240,22 @@ impl TokenTracker {
                 info!("  Buy count: {}", data.buy_count);
                 info!("  First seen: {}", data.first_seen);
                 info!("  Age: {}s", (timestamp - data.first_seen).num_seconds());
+                if data.is_migrated {
+                    info!("  ✅ Already migrated to Raydium!");
+                }
+            }
+        }
+        
+        // Log new migrations
+        if is_new_migrate {
+            if let Some(data) = self.token_data.get(&mint) {
+                info!("🚀 TOKEN MIGRATION DETECTED: {}", mint);
+                info!("  Total SOL spent: {:.2} SOL", data.total_sol_spent);
+                info!("  Buy count: {}", data.buy_count);
+                info!("  Migrated at: {}", timestamp);
+                if data.is_hot {
+                    info!("  🔥 This was a HOT token!");
+                }
             }
         }
     }
@@ -236,19 +296,30 @@ impl TokenTracker {
     }
     
     /// Get statistics about tracked tokens
-    pub fn get_stats(&self) -> (usize, usize) {
+    pub fn get_stats(&self) -> (usize, usize, usize) {
         let total_tokens = self.token_data.len();
         let hot_tokens = self.token_data.iter()
             .filter(|entry| entry.value().is_hot)
             .count();
+        let migrated_tokens = self.token_data.iter()
+            .filter(|entry| entry.value().is_migrated)
+            .count();
         
-        (total_tokens, hot_tokens)
+        (total_tokens, hot_tokens, migrated_tokens)
     }
     
     /// Get list of hot tokens
     pub fn get_hot_tokens(&self) -> Vec<String> {
         self.token_data.iter()
             .filter(|entry| entry.value().is_hot)
+            .map(|entry| entry.value().mint_address.clone())
+            .collect()
+    }
+    
+    /// Get list of migrated tokens
+    pub fn get_migrated_tokens(&self) -> Vec<String> {
+        self.token_data.iter()
+            .filter(|entry| entry.value().is_migrated)
             .map(|entry| entry.value().mint_address.clone())
             .collect()
     }
@@ -420,13 +491,20 @@ impl SolanaBlockScanner {
                     }
                     
                     // Log current token tracker stats
-                    let (total_tokens, hot_tokens) = self.token_tracker.get_stats();
-                    info!("Token tracker stats: {} tokens tracked, {} hot tokens", total_tokens, hot_tokens);
+                    let (total_tokens, hot_tokens, migrated_tokens) = self.token_tracker.get_stats();
+                    info!("Token tracker stats: {} tokens tracked, {} hot tokens, {} migrated tokens", 
+                          total_tokens, hot_tokens, migrated_tokens);
                     
                     // If there are hot tokens, list them
                     if hot_tokens > 0 {
                         let hot_token_list = self.token_tracker.get_hot_tokens();
                         info!("Current hot tokens: {}", hot_token_list.join(", "));
+                    }
+                    
+                    // If there are migrated tokens, list them
+                    if migrated_tokens > 0 {
+                        let migrated_token_list = self.token_tracker.get_migrated_tokens();
+                        info!("Migrated tokens: {}", migrated_token_list.join(", "));
                     }
                 }
                 
@@ -442,8 +520,9 @@ impl SolanaBlockScanner {
               self.blocks_processed, self.transactions_processed);
               
         // Log final token tracker stats
-        let (total_tokens, hot_tokens) = self.token_tracker.get_stats();
-        info!("Final token tracker stats: {} tokens tracked, {} hot tokens", total_tokens, hot_tokens);
+        let (total_tokens, hot_tokens, migrated_tokens) = self.token_tracker.get_stats();
+        info!("Final token tracker stats: {} tokens tracked, {} hot tokens, {} migrated tokens", 
+              total_tokens, hot_tokens, migrated_tokens);
         
         Ok(())
     }
@@ -544,12 +623,14 @@ impl SolanaBlockScanner {
             }
         };
 
-        // Process each transaction and filter for Pump.fun buy transactions
+        // Process each transaction and filter for Pump.fun transactions
         for (tx_index, transaction) in transactions.iter().enumerate() {
             // Check if this transaction involves Pump.fun program
             if self.is_pump_fun_transaction(transaction) {
-                // Only process if it's a buy transaction
-                if self.has_instruction_type(transaction, &BUY_INSTRUCTION_DISCRIMINATOR) {
+                // Process CREATE, BUY, and MIGRATE transactions
+                if self.has_instruction_type(transaction, &CREATE_INSTRUCTION_DISCRIMINATOR) ||
+                   self.has_instruction_type(transaction, &MIGRATE_INSTRUCTION_DISCRIMINATOR) {
+                    
                     // Check if the transaction was successful
                     let is_successful = transaction.meta.as_ref()
                         .map(|meta| meta.err.is_none())
@@ -557,21 +638,24 @@ impl SolanaBlockScanner {
                     
                     // Skip failed transactions
                     if !is_successful {
-                        debug!("Skipping failed buy transaction");
+                        debug!("Skipping failed Pump.fun transaction");
                         continue;
                     }
                     
-                    // Process and log all successful Pump.fun BUY transactions
+                    // Process and log successful Pump.fun transactions
                     match self.process_single_transaction(transaction, processed_block, tx_index).await {
                         Ok(processed_tx) => {
+                            // Handle CREATE and BUY transactions
                             if processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Create) {
-                                info!("Found Pump.fun CREATE transaction: {}", processed_tx.signature);
+                                
+                                let tx_type = processed_tx.pump_fun_instruction_type.as_ref().unwrap();
+                                info!("Found Pump.fun {:?} transaction: {}", tx_type, processed_tx.signature);
 
                                 // Extract mint address for tracking
-                                if let Some(mint_address) = self.extract_mint_address_from_buy(transaction) {
+                                if let Some(mint_address) = self.extract_mint_address_from_transaction(transaction, tx_type) {
                                     info!("  Token Mint: {}", mint_address);
                                     
-                                    // Extract SOL amount spent
+                                    // Extract SOL amount spent (only for buy/create transactions)
                                     if let Some(sol_amount) = self.extract_sol_amount_from_buy(transaction) {
                                         info!("  SOL Spent: {:.4} SOL", sol_amount);
                                         
@@ -580,33 +664,32 @@ impl SolanaBlockScanner {
                                             mint_address,
                                             processed_tx.signature.clone(),
                                             sol_amount,
-                                            processed_tx.processed_at
+                                            processed_tx.processed_at,
+                                            tx_type.clone()
                                         );
                                     }
                                 }
                             
                                 info!("  Slot: {} Block: {}", processed_tx.slot, processed_tx.block_hash);
                                 self.transactions_processed += 1;
+                                
+                            // Handle MIGRATE transactions
                             } else if processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Migrate) {
                                 info!("Found Pump.fun MIGRATE transaction: {}", processed_tx.signature);
 
                                 // Extract mint address for tracking
-                                // if let Some(mint_address) = self.extract_mint_address_from_buy(transaction) {
-                                //     info!("  Token Mint: {}", mint_address);
+                                if let Some(mint_address) = self.extract_mint_address_from_transaction(transaction, &PumpFunInstructionType::Migrate) {
+                                    info!("  Token Mint: {}", mint_address);
                                     
-                                //     // Extract SOL amount spent
-                                //     if let Some(sol_amount) = self.extract_sol_amount_from_buy(transaction) {
-                                //         info!("  SOL Spent: {:.4} SOL", sol_amount);
-                                        
-                                //         // Record this transaction for hot token tracking
-                                //         self.token_tracker.record_transaction(
-                                //             mint_address,
-                                //             processed_tx.signature.clone(),
-                                //             sol_amount,
-                                //             processed_tx.processed_at
-                                //         );
-                                //     }
-                                // }
+                                    // Record this migration (no SOL amount for migrations)
+                                    self.token_tracker.record_transaction(
+                                        mint_address,
+                                        processed_tx.signature.clone(),
+                                        0.0, // No SOL spent in migrations
+                                        processed_tx.processed_at,
+                                        PumpFunInstructionType::Migrate
+                                    );
+                                }
                             
                                 info!("  Slot: {} Block: {}", processed_tx.slot, processed_tx.block_hash);
                                 self.transactions_processed += 1;
@@ -926,30 +1009,54 @@ impl SolanaBlockScanner {
         (self.blocks_processed, self.transactions_processed, self.processed_blocks.len())
     }
 
-    /// Extract the mint address from a buy transaction
+    /// Extract the mint address from a transaction based on instruction type
     ///
     /// # Arguments
-    /// * `transaction` - The transaction containing the buy instruction
+    /// * `transaction` - The transaction containing the instruction
+    /// * `instruction_type` - The type of instruction to extract from
     ///
     /// # Returns
     /// * `Option<String>` - The mint address if found
-    fn extract_mint_address_from_buy(&self, transaction: &solana_transaction_status::EncodedTransactionWithStatusMeta) -> Option<String> {
-        // Find the buy instruction
+    fn extract_mint_address_from_transaction(
+        &self, 
+        transaction: &solana_transaction_status::EncodedTransactionWithStatusMeta,
+        instruction_type: &PumpFunInstructionType
+    ) -> Option<String> {
+        // Get the appropriate discriminator for the instruction type
+        let discriminator = match instruction_type {
+            PumpFunInstructionType::Buy => &BUY_INSTRUCTION_DISCRIMINATOR,
+            PumpFunInstructionType::Create => &CREATE_INSTRUCTION_DISCRIMINATOR,
+            PumpFunInstructionType::Migrate => &MIGRATE_INSTRUCTION_DISCRIMINATOR,
+            _ => return None,
+        };
+
+        // Find the instruction with the matching discriminator
         match &transaction.transaction {
             solana_transaction_status::EncodedTransaction::Json(ui_transaction) => {
                 match &ui_transaction.message {
                     solana_transaction_status::UiMessage::Parsed(parsed_message) => {
-                        // For parsed messages, we need to check each instruction
+                        // For parsed messages, check each instruction
                         for instruction in &parsed_message.instructions {
                             match instruction {
                                 solana_transaction_status::UiInstruction::Compiled(compiled) => {
-                                    // Check if this is the buy instruction
+                                    // Check if this matches our target instruction type
                                     if let Ok(data) = bs58::decode(&compiled.data).into_vec() {
-                                        if data.len() >= 8 && data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
-                                            // According to the Pump.fun IDL, the mint account is the 3rd account (index 2)
-                                            // in the buy instruction
-                                            if compiled.accounts.len() > 2 {
-                                                let mint_idx = compiled.accounts[2] as usize;
+                                        if data.len() >= 8 && data[0..8] == discriminator[..] {
+                                            // For different instruction types, the mint account is at different positions
+                                            let mint_account_index = match instruction_type {
+                                                PumpFunInstructionType::Buy | PumpFunInstructionType::Create => {
+                                                    // For buy/create, mint is typically the 3rd account (index 2)
+                                                    if compiled.accounts.len() > 2 { Some(2) } else { None }
+                                                }
+                                                PumpFunInstructionType::Migrate => {
+                                                    // For migrate, mint is typically the 2nd account (index 1)
+                                                    if compiled.accounts.len() > 1 { Some(1) } else { None }
+                                                }
+                                                _ => None,
+                                            };
+                                            
+                                            if let Some(account_idx) = mint_account_index {
+                                                let mint_idx = compiled.accounts[account_idx] as usize;
                                                 if mint_idx < parsed_message.account_keys.len() {
                                                     return Some(parsed_message.account_keys[mint_idx].pubkey.clone());
                                                 }
@@ -964,12 +1071,24 @@ impl SolanaBlockScanner {
                     solana_transaction_status::UiMessage::Raw(raw_message) => {
                         // For raw messages, check each instruction
                         for instruction in &raw_message.instructions {
-                            // Check if this is the buy instruction
+                            // Check if this matches our target instruction type
                             if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
-                                if data.len() >= 8 && data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
-                                    // The mint account is the 3rd account (index 2) in the accounts list
-                                    if instruction.accounts.len() > 2 {
-                                        let mint_idx = instruction.accounts[2] as usize;
+                                if data.len() >= 8 && data[0..8] == discriminator[..] {
+                                    // For different instruction types, the mint account is at different positions
+                                    let mint_account_index = match instruction_type {
+                                        PumpFunInstructionType::Buy | PumpFunInstructionType::Create => {
+                                            // For buy/create, mint is typically the 3rd account (index 2)
+                                            if instruction.accounts.len() > 2 { Some(2) } else { None }
+                                        }
+                                        PumpFunInstructionType::Migrate => {
+                                            // For migrate, mint is typically the 2nd account (index 1)
+                                            if instruction.accounts.len() > 1 { Some(1) } else { None }
+                                        }
+                                        _ => None,
+                                    };
+                                    
+                                    if let Some(account_idx) = mint_account_index {
+                                        let mint_idx = instruction.accounts[account_idx] as usize;
                                         if mint_idx < raw_message.account_keys.len() {
                                             return Some(raw_message.account_keys[mint_idx].clone());
                                         }
@@ -1129,15 +1248,22 @@ async fn main() -> Result<()> {
             info!("  Pump.fun Transactions Found: {}", transactions_processed);
             info!("  Cached Blocks: {}", cached_blocks);
             
-            // Add hot token stats
-            let (total_tokens, hot_tokens) = scanner.token_tracker.get_stats();
+            // Add hot token and migration stats
+            let (total_tokens, hot_tokens, migrated_tokens) = scanner.token_tracker.get_stats();
             info!("  Tokens Tracked: {}", total_tokens);
             info!("  Hot Tokens: {}", hot_tokens);
+            info!("  Migrated Tokens: {}", migrated_tokens);
             
             // List hot tokens if any
             if hot_tokens > 0 {
                 let hot_token_list = scanner.token_tracker.get_hot_tokens();
                 info!("Hot tokens: {}", hot_token_list.join(", "));
+            }
+            
+            // List migrated tokens if any
+            if migrated_tokens > 0 {
+                let migrated_token_list = scanner.token_tracker.get_migrated_tokens();
+                info!("Migrated tokens: {}", migrated_token_list.join(", "));
             }
         }
     }
