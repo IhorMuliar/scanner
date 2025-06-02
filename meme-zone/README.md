@@ -235,4 +235,4 @@ HOT_TIME_WINDOW=3600
 
 This project implements the core about-to-graduate token monitoring functionality as specified. The bonding curve progress calculation uses the exact formula provided and tracks graduation thresholds accurately.
 
-For advanced features like real-time log parsing, additional Solana SDK expertise may be required to handle the `OptionSerializer` complexity in transaction logs. 
+For advanced features like real-time log parsing, additional Solana SDK expertise may be required to handle the `OptionSerializer` complexity in transaction logs.
