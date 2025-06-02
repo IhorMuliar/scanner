@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use borsh::BorshDeserialize;
 use bs58;
 use chrono::{DateTime, Utc};
 use clap::Parser;
@@ -9,6 +10,7 @@ use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
+use solana_sdk::pubkey::Pubkey;
 use tokio::time::{interval, sleep};
 
 /// Pump.fun program ID - the main program responsible for token creation and trading
@@ -20,6 +22,17 @@ const SELL_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [51, 230, 133, 164, 1, 127, 131,
 const CREATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [24, 30, 200, 40, 5, 28, 7, 119];
 const MIGRATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [155, 234, 231, 146, 236, 158, 162, 30];
 const SET_CREATOR_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [254, 148, 255, 112, 207, 142, 170, 165];
+
+/// Bonding curve constants for graduation calculations
+/// Initial virtual token reserves at the start of the curve (1,073,000,000 * 10^6)
+const INITIAL_VIRTUAL_TOKEN_RESERVES: u64 = 1_073_000_000_000_000;
+/// Total tokens that can be sold from the curve (793,100,000 * 10^6)
+const TOTAL_SELLABLE_TOKENS: u64 = 793_100_000_000_000;
+/// SOL threshold for graduation to Raydium (approximately 85 SOL)
+const GRADUATION_SOL_THRESHOLD: f64 = 85.0;
+
+/// Graduation progress thresholds for alerting
+const GRADUATION_ALERT_THRESHOLDS: &[f64] = &[50.0, 70.0, 80.0, 90.0, 95.0, 99.0];
 
 /// Solana Token Scanner - Monitor blockchain for new blocks and transactions
 #[derive(Parser, Debug)]
@@ -356,6 +369,168 @@ struct ProcessedTransaction {
     processed_at: DateTime<Utc>,
 }
 
+/// Represents the state of a bonding curve for a token
+/// This struct mirrors the on-chain account structure for pump.fun bonding curves
+#[derive(Debug, Clone, BorshDeserialize)]
+struct BondingCurveState {
+    discriminator: u64,
+    /// Virtual token reserves (for pricing calculations)
+    virtual_token_reserves: u64,
+    /// Virtual SOL reserves (for pricing calculations)
+    virtual_sol_reserves: u64,
+    /// Real token reserves (actual tokens remaining)
+    real_token_reserves: u64,
+    /// Real SOL reserves (actual SOL collected)
+    real_sol_reserves: u64,
+    /// Total supply of the token
+    token_total_supply: u64,
+    /// Whether the curve has completed and migrated
+    complete: bool,
+    creator: Pubkey,
+    /// When this state was last updated (not part of on-chain data)
+    #[borsh(skip)]
+    last_updated: DateTime<Utc>,
+}
+
+impl BondingCurveState {
+    /// Calculate the graduation progress percentage (0-100)
+    /// Based on: ((INITIAL_VIRTUAL_TOKEN_RESERVES - virtual_token_reserves) * 100) / TOTAL_SELLABLE_TOKENS
+    pub fn calculate_graduation_progress(&self) -> f64 {
+        if self.virtual_token_reserves >= INITIAL_VIRTUAL_TOKEN_RESERVES {
+            return 0.0;
+        }
+        
+        let tokens_sold = INITIAL_VIRTUAL_TOKEN_RESERVES - self.virtual_token_reserves;
+        (tokens_sold as f64 * 100.0) / TOTAL_SELLABLE_TOKENS as f64
+    }
+    
+    /// Calculate current market cap in SOL using bonding curve formula
+    /// Using virtual reserves for accurate pricing: virtual_sol_reserves / virtual_token_reserves
+    pub fn calculate_market_cap_sol(&self) -> f64 {
+        if self.virtual_token_reserves == 0 {
+            return 0.0;
+        }
+        
+        // Current price per token in SOL
+        let price_per_token = self.virtual_sol_reserves as f64 / self.virtual_token_reserves as f64;
+        
+        // Market cap = price * circulating supply
+        let circulating_supply = self.token_total_supply - self.real_token_reserves;
+        (price_per_token * circulating_supply as f64) / 1_000_000_000.0 // Convert from lamports
+    }
+    
+    /// Calculate SOL needed to reach graduation threshold
+    pub fn sol_needed_for_graduation(&self) -> f64 {
+        let current_sol = self.real_sol_reserves as f64 / 1_000_000_000.0; // Convert from lamports
+        (GRADUATION_SOL_THRESHOLD - current_sol).max(0.0)
+    }
+    
+    /// Check if token is close to graduation (above any threshold)
+    pub fn is_close_to_graduation(&self) -> Option<f64> {
+        let progress = self.calculate_graduation_progress();
+        GRADUATION_ALERT_THRESHOLDS.iter()
+            .find(|&&threshold| progress >= threshold)
+            .copied()
+    }
+}
+
+/// Tracks graduation progress for tokens
+#[derive(Debug)]
+struct GraduationTracker {
+    /// Map of mint addresses to their bonding curve states
+    bonding_curves: DashMap<String, BondingCurveState>,
+    /// Track which graduation thresholds have been alerted for each token
+    alerted_thresholds: DashMap<String, Vec<f64>>,
+}
+
+impl GraduationTracker {
+    /// Create a new graduation tracker
+    pub fn new() -> Self {
+        info!("Initializing graduation tracker for about-to-graduate tokens");
+        Self {
+            bonding_curves: DashMap::new(),
+            alerted_thresholds: DashMap::new(),
+        }
+    }
+    
+    /// Update bonding curve state for a token
+    pub fn update_bonding_curve(&self, mint: String, state: BondingCurveState) {
+        debug!("Updating bonding curve state for token {}", mint);
+        
+        let _progress = state.calculate_graduation_progress();
+        let _market_cap = state.calculate_market_cap_sol();
+        let _sol_needed = state.sol_needed_for_graduation();
+        
+        // Check if we should alert for new graduation thresholds
+        if let Some(current_threshold) = state.is_close_to_graduation() {
+            let mut should_alert = false;
+            
+            self.alerted_thresholds.entry(mint.clone()).and_modify(|thresholds| {
+                if !thresholds.contains(&current_threshold) {
+                    thresholds.push(current_threshold);
+                    should_alert = true;
+                }
+            }).or_insert_with(|| {
+                should_alert = true;
+                vec![current_threshold]
+            });
+            
+            if should_alert {
+                self.log_graduation_alert(&mint, &state, current_threshold);
+            }
+        }
+        
+        // Update the bonding curve state
+        self.bonding_curves.insert(mint, state);
+    }
+    
+    /// Log graduation alert for a token reaching a new threshold
+    fn log_graduation_alert(&self, mint: &str, state: &BondingCurveState, threshold: f64) {
+        let progress = state.calculate_graduation_progress();
+        let market_cap = state.calculate_market_cap_sol();
+        let sol_needed = state.sol_needed_for_graduation();
+        let current_sol = state.real_sol_reserves as f64 / 1_000_000_000.0;
+        
+        warn!("🎯 GRADUATION ALERT ({}%): {}", threshold, mint);
+        info!("  Graduation progress: {:.2}%", progress);
+        info!("  Current market cap: {:.4} SOL", market_cap);
+        info!("  SOL collected: {:.4} / {:.1}", current_sol, GRADUATION_SOL_THRESHOLD);
+        info!("  SOL needed: {:.4}", sol_needed);
+        info!("  Virtual token reserves: {}", state.virtual_token_reserves);
+        info!("  Real token reserves: {}", state.real_token_reserves);
+        
+        if progress >= 95.0 {
+            warn!("  🚨 CRITICAL: Token is very close to graduation!");
+        }
+    }
+    
+    /// Get all tokens that are close to graduation (above 50% threshold)
+    pub fn get_tokens_close_to_graduation(&self) -> Vec<(String, f64, f64)> {
+        self.bonding_curves.iter()
+            .filter_map(|entry| {
+                let (mint, state) = (entry.key(), entry.value());
+                let progress = state.calculate_graduation_progress();
+                if progress >= 50.0 {
+                    Some((mint.clone(), progress, state.calculate_market_cap_sol()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    
+    /// Get graduation statistics
+    pub fn get_graduation_stats(&self) -> (usize, usize, usize) {
+        let total_tracked = self.bonding_curves.len();
+        let close_to_graduation = self.get_tokens_close_to_graduation().len();
+        let completed = self.bonding_curves.iter()
+            .filter(|entry| entry.value().complete)
+            .count();
+            
+        (total_tracked, close_to_graduation, completed)
+    }
+}
+
 /// Main scanner struct that manages the blockchain scanning process
 pub struct SolanaBlockScanner {
     /// RPC client for connecting to Solana network (wrapped in Arc for sharing)
@@ -374,6 +549,8 @@ pub struct SolanaBlockScanner {
     transactions_processed: u64,
     /// Token tracker for hot token detection
     token_tracker: TokenTracker,
+    /// Graduation tracker for about-to-graduate tokens
+    graduation_tracker: GraduationTracker,
 }
 
 impl SolanaBlockScanner {
@@ -424,6 +601,9 @@ impl SolanaBlockScanner {
         // 5 SOL in 5 buys within 1 hour (3600 seconds) makes a token "hot"
         let token_tracker = TokenTracker::new(5.0, 5, 3600);
 
+        // Initialize graduation tracker
+        let graduation_tracker = GraduationTracker::new();
+
         Ok(Self {
             rpc_client,
             processed_blocks: DashMap::new(),
@@ -433,6 +613,7 @@ impl SolanaBlockScanner {
             blocks_processed: 0,
             transactions_processed: 0,
             token_tracker,
+            graduation_tracker,
         })
     }
 
@@ -485,27 +666,8 @@ impl SolanaBlockScanner {
                 
                 // Handle cleanup of old tokens
                 _ = cleanup_timer.tick() => {
-                    let removed = self.token_tracker.cleanup_old_tokens();
-                    if removed > 0 {
-                        info!("Cleaned up {} inactive tokens from memory", removed);
-                    }
-                    
-                    // Log current token tracker stats
-                    let (total_tokens, hot_tokens, migrated_tokens) = self.token_tracker.get_stats();
-                    info!("Token tracker stats: {} tokens tracked, {} hot tokens, {} migrated tokens", 
-                          total_tokens, hot_tokens, migrated_tokens);
-                    
-                    // If there are hot tokens, list them
-                    if hot_tokens > 0 {
-                        let hot_token_list = self.token_tracker.get_hot_tokens();
-                        info!("Current hot tokens: {}", hot_token_list.join(", "));
-                    }
-                    
-                    // If there are migrated tokens, list them
-                    if migrated_tokens > 0 {
-                        let migrated_token_list = self.token_tracker.get_migrated_tokens();
-                        info!("Migrated tokens: {}", migrated_token_list.join(", "));
-                    }
+                    // Use our comprehensive periodic stats function
+                    self.log_periodic_stats().await;
                 }
                 
                 // Handle graceful shutdown on Ctrl+C
@@ -519,10 +681,8 @@ impl SolanaBlockScanner {
         info!("Scanning completed. Blocks processed: {}, Transactions processed: {}", 
               self.blocks_processed, self.transactions_processed);
               
-        // Log final token tracker stats
-        let (total_tokens, hot_tokens, migrated_tokens) = self.token_tracker.get_stats();
-        info!("Final token tracker stats: {} tokens tracked, {} hot tokens, {} migrated tokens", 
-              total_tokens, hot_tokens, migrated_tokens);
+        // Log final comprehensive stats
+        self.log_periodic_stats().await;
         
         Ok(())
     }
@@ -629,6 +789,7 @@ impl SolanaBlockScanner {
             if self.is_pump_fun_transaction(transaction) {
                 // Process CREATE, BUY, and MIGRATE transactions
                 if self.has_instruction_type(transaction, &CREATE_INSTRUCTION_DISCRIMINATOR) ||
+                   self.has_instruction_type(transaction, &BUY_INSTRUCTION_DISCRIMINATOR) ||
                    self.has_instruction_type(transaction, &MIGRATE_INSTRUCTION_DISCRIMINATOR) {
                     
                     // Check if the transaction was successful
@@ -646,44 +807,69 @@ impl SolanaBlockScanner {
                     match self.process_single_transaction(transaction, processed_block, tx_index).await {
                         Ok(processed_tx) => {
                             // Handle CREATE and BUY transactions
-                            if processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Create) {
+                            if processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Create) ||
+                               processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Buy) {
                                 
                                 let tx_type = processed_tx.pump_fun_instruction_type.as_ref().unwrap();
                                 info!("Found Pump.fun {:?} transaction: {}", tx_type, processed_tx.signature);
 
                                 // Extract mint address for tracking
-                                if let Some(mint_address) = self.extract_mint_address_from_transaction(transaction, tx_type) {
-                                    info!("  Token Mint: {}", mint_address);
+                                if let Some(mint) = self.extract_mint_address_from_transaction(transaction, tx_type) {
+                                    info!("  Token Mint: {}", mint);
                                     
                                     // Extract SOL amount spent (only for buy/create transactions)
-                                    if let Some(sol_amount) = self.extract_sol_amount_from_buy(transaction) {
-                                        info!("  SOL Spent: {:.4} SOL", sol_amount);
+                                    let sol_amount = self.extract_sol_amount_from_buy(transaction);
+                                    if let Some(sol_amt) = sol_amount {
+                                        info!("  SOL Spent: {:.4} SOL", sol_amt);
                                         
                                         // Record this transaction for hot token tracking
                                         self.token_tracker.record_transaction(
-                                            mint_address,
+                                            mint.clone(),
                                             processed_tx.signature.clone(),
-                                            sol_amount,
+                                            sol_amt,
                                             processed_tx.processed_at,
                                             tx_type.clone()
                                         );
+                                    }
+                                    
+                                    // Extract and update bonding curve state for buy transactions
+                                    if matches!(tx_type, PumpFunInstructionType::Buy) {
+                                        if let Some(bonding_curve_state) = self.extract_bonding_curve_from_transaction(transaction) {
+                                            self.graduation_tracker.update_bonding_curve(
+                                                mint.clone(),
+                                                bonding_curve_state,
+                                            );
+                                        }
+                                    }
+
+                                    // Log transaction details
+                                    info!("📊 {} Transaction: {} ({})",
+                                        format!("{:?}", tx_type),
+                                        mint,
+                                        processed_tx.signature,
+                                    );
+
+                                    if let Some(sol_amt) = sol_amount {
+                                        if sol_amt > 0.0 {
+                                            info!("  💰 SOL amount: {:.4}", sol_amt);
+                                        }
                                     }
                                 }
                             
                                 info!("  Slot: {} Block: {}", processed_tx.slot, processed_tx.block_hash);
                                 self.transactions_processed += 1;
-                                
+                            
                             // Handle MIGRATE transactions
                             } else if processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Migrate) {
                                 info!("Found Pump.fun MIGRATE transaction: {}", processed_tx.signature);
 
                                 // Extract mint address for tracking
-                                if let Some(mint_address) = self.extract_mint_address_from_transaction(transaction, &PumpFunInstructionType::Migrate) {
-                                    info!("  Token Mint: {}", mint_address);
+                                if let Some(mint) = self.extract_mint_address_from_transaction(transaction, &PumpFunInstructionType::Migrate) {
+                                    info!("  Token Mint: {}", mint);
                                     
                                     // Record this migration (no SOL amount for migrations)
                                     self.token_tracker.record_transaction(
-                                        mint_address,
+                                        mint,
                                         processed_tx.signature.clone(),
                                         0.0, // No SOL spent in migrations
                                         processed_tx.processed_at,
@@ -763,8 +949,8 @@ impl SolanaBlockScanner {
                         for instruction in &parsed_message.instructions {
                             // For parsed instructions, we need to get program_id and data
                             // differently based on whether it's a parsed instruction or not
-                            let (program_id, data) = match instruction {
-                                solana_transaction_status::UiInstruction::Parsed(parsed_instruction) => {
+                            let (_program_id, data) = match instruction {
+                                solana_transaction_status::UiInstruction::Parsed(_parsed_instruction) => {
                                     // For parsed instructions, we don't have direct access to raw data
                                     // Let's skip them for now and rely on the compiled instructions
                                     continue;
@@ -1178,6 +1364,183 @@ impl SolanaBlockScanner {
         
         // Fallback to transaction fee if we couldn't determine the spent amount
         Some(meta.fee as f64 / 1_000_000_000.0)
+    }
+
+    /// Extract bonding curve data from a transaction by fetching the account state
+    ///
+    /// # Arguments
+    /// * `transaction` - The transaction containing pump.fun instructions
+    ///
+    /// # Returns
+    /// * `Option<BondingCurveState>` - The bonding curve state if successfully extracted
+    fn extract_bonding_curve_from_transaction(&self, transaction: &solana_transaction_status::EncodedTransactionWithStatusMeta) -> Option<BondingCurveState> {
+        // Extract the bonding curve account address from the transaction
+        let bonding_curve_address = self.extract_bonding_curve_address_from_transaction(transaction)?;
+        
+        // Convert string address to Pubkey
+        let bonding_curve_pubkey = match bonding_curve_address.parse::<Pubkey>() {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                debug!("Failed to parse bonding curve address {}: {}", bonding_curve_address, e);
+                return None;
+            }
+        };
+        
+        // Fetch account data from the blockchain
+        match self.rpc_client.get_account(&bonding_curve_pubkey) {
+            Ok(account_info) => {
+                // Deserialize the account data using Borsh
+                let mut data_slice = account_info.data.as_slice();
+                match BondingCurveState::deserialize(&mut data_slice) {
+                    Ok(mut bonding_curve_state) => {
+                        // Set the last_updated timestamp
+                        bonding_curve_state.last_updated = Utc::now();
+                        info!("Successfully extracted bonding curve state for {}: real_sol_reserves={} lamports ({:.4} SOL), real_token_reserves={}, complete={}", 
+                              bonding_curve_address, 
+                              bonding_curve_state.real_sol_reserves,
+                              bonding_curve_state.real_sol_reserves as f64 / 1_000_000_000.0,
+                              bonding_curve_state.real_token_reserves,
+                              bonding_curve_state.complete,
+                              );
+                        
+                        Some(bonding_curve_state)
+                    },
+                    Err(e) => {
+                        info!("Failed to deserialize bonding curve account data for {}: {}", bonding_curve_address, e);
+                        debug!("Account data length: {} bytes", account_info.data.len());
+                        None
+                    }
+                }
+            },
+            Err(e) => {
+                debug!("Failed to fetch bonding curve account {} from RPC: {}", bonding_curve_address, e);
+                None
+            }
+        }
+    }
+
+    /// Extract bonding curve account address from a pump.fun transaction
+    ///
+    /// # Arguments  
+    /// * `transaction` - The transaction to extract the address from
+    ///
+    /// # Returns
+    /// * `Option<String>` - The bonding curve account address if found
+    fn extract_bonding_curve_address_from_transaction(&self, transaction: &solana_transaction_status::EncodedTransactionWithStatusMeta) -> Option<String> {
+        // Process transaction based on its encoding type
+        match &transaction.transaction {
+            solana_transaction_status::EncodedTransaction::Json(ui_transaction) => {
+                match &ui_transaction.message {
+                    solana_transaction_status::UiMessage::Parsed(parsed_message) => {
+                        // For buy transactions, the bonding curve is typically at index 2 or 3
+                        // We need to check the instruction to find the correct account index
+                        for instruction in &parsed_message.instructions {
+                            if let solana_transaction_status::UiInstruction::Compiled(compiled) = instruction {
+                                let program_idx = compiled.program_id_index as usize;
+                                if program_idx >= parsed_message.account_keys.len() {
+                                    continue;
+                                }
+
+                                let program_id = &parsed_message.account_keys[program_idx].pubkey;
+                                if program_id != PUMP_FUN_PROGRAM_ID {
+                                    continue;
+                                }
+
+                                // Check if this is a buy instruction
+                                if let Ok(decoded_data) = bs58::decode(&compiled.data).into_vec() {
+                                    if decoded_data.len() >= 8 && decoded_data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
+                                        // For buy instructions, bonding curve is typically at account index 3
+                                        if compiled.accounts.len() > 3 {
+                                            let bonding_curve_index = compiled.accounts[3] as usize;
+                                            if bonding_curve_index < parsed_message.account_keys.len() {
+                                                return Some(parsed_message.account_keys[bonding_curve_index].pubkey.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    },
+                    solana_transaction_status::UiMessage::Raw(raw_message) => {
+                        // Handle raw instructions
+                        for instruction in &raw_message.instructions {
+                            let program_id = if instruction.program_id_index < raw_message.account_keys.len() as u8 {
+                                &raw_message.account_keys[instruction.program_id_index as usize]
+                            } else {
+                                continue;
+                            };
+                            
+                            if program_id == PUMP_FUN_PROGRAM_ID {
+                                // Check if this is a buy instruction
+                                if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
+                                    if data.len() >= 8 && data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
+                                        // For buy instructions, bonding curve is typically at account index 3
+                                        if instruction.accounts.len() > 3 {
+                                            let bonding_curve_index = instruction.accounts[3] as usize;
+                                            if bonding_curve_index < raw_message.account_keys.len() {
+                                                return Some(raw_message.account_keys[bonding_curve_index].clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Log periodic scanner statistics and hot token information
+    async fn log_periodic_stats(&self) {
+        let (blocks_processed, txs_processed, hot_tokens_count) = self.get_stats();
+        let (hot_tokens, migrated_tokens) = (
+            self.token_tracker.get_hot_tokens(),
+            self.token_tracker.get_migrated_tokens()
+        );
+        let (total_tracked, close_to_graduation, completed) = self.graduation_tracker.get_graduation_stats();
+        let close_tokens = self.graduation_tracker.get_tokens_close_to_graduation();
+
+        info!("📈 SCANNER STATISTICS:");
+        info!("  Blocks processed: {}", blocks_processed);
+        info!("  Transactions processed: {}", txs_processed);
+        info!("  Hot tokens detected: {}", hot_tokens_count);
+        info!("  Migrated tokens: {}", migrated_tokens.len());
+        
+        info!("🎯 GRADUATION TRACKING:");
+        info!("  Total tokens tracked: {}", total_tracked);
+        info!("  Close to graduation (>50%): {}", close_to_graduation);
+        info!("  Completed tokens: {}", completed);
+
+        if !hot_tokens.is_empty() {
+            info!("🔥 Active hot tokens: {}", hot_tokens.len());
+            for (i, token) in hot_tokens.iter().take(5).enumerate() {
+                info!("  {}. {}", i + 1, token);
+            }
+            if hot_tokens.len() > 5 {
+                info!("  ... and {} more", hot_tokens.len() - 5);
+            }
+        }
+
+        if !close_tokens.is_empty() {
+            info!("🎯 Tokens close to graduation:");
+            for (i, (mint, progress, market_cap)) in close_tokens.iter().take(5).enumerate() {
+                info!("  {}. {} - {:.1}% progress, {:.4} SOL market cap", 
+                      i + 1, mint, progress, market_cap);
+            }
+            if close_tokens.len() > 5 {
+                info!("  ... and {} more", close_tokens.len() - 5);
+            }
+        }
+
+        // Clean up old tokens periodically
+        let cleaned = self.token_tracker.cleanup_old_tokens();
+        if cleaned > 0 {
+            info!("🧹 Cleaned up {} old token records", cleaned);
+        }
     }
 }
 
