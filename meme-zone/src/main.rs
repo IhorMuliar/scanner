@@ -807,9 +807,7 @@ impl SolanaBlockScanner {
                     match self.process_single_transaction(transaction, processed_block, tx_index).await {
                         Ok(processed_tx) => {
                             // Handle CREATE and BUY transactions
-                            if processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Create) ||
-                               processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Buy) {
-                                
+                            if processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Create) {
                                 let tx_type = processed_tx.pump_fun_instruction_type.as_ref().unwrap();
                                 info!("Found Pump.fun {:?} transaction: {}", tx_type, processed_tx.signature);
 
@@ -831,16 +829,6 @@ impl SolanaBlockScanner {
                                             tx_type.clone()
                                         );
                                     }
-                                    
-                                    // Extract and update bonding curve state for buy transactions
-                                    if matches!(tx_type, PumpFunInstructionType::Buy) {
-                                        if let Some(bonding_curve_state) = self.extract_bonding_curve_from_transaction(transaction) {
-                                            self.graduation_tracker.update_bonding_curve(
-                                                mint.clone(),
-                                                bonding_curve_state,
-                                            );
-                                        }
-                                    }
 
                                     // Log transaction details
                                     info!("📊 {} Transaction: {} ({})",
@@ -858,8 +846,19 @@ impl SolanaBlockScanner {
                             
                                 info!("  Slot: {} Block: {}", processed_tx.slot, processed_tx.block_hash);
                                 self.transactions_processed += 1;
-                            
-                            // Handle MIGRATE transactions
+                            } else if processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Buy) ||
+                                processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Sell) {
+                                    let tx_type = processed_tx.pump_fun_instruction_type.as_ref().unwrap();
+
+                                    if let Some(mint) = self.extract_mint_address_from_transaction(transaction, tx_type) {                                        
+                                        // Extract and update bonding curve state for buy transactions
+                                        if let Some(bonding_curve_state) = self.extract_bonding_curve_from_transaction(transaction) {
+                                            self.graduation_tracker.update_bonding_curve(
+                                                mint.clone(),
+                                                bonding_curve_state,
+                                            );
+                                        }
+                                    }
                             } else if processed_tx.pump_fun_instruction_type == Some(PumpFunInstructionType::Migrate) {
                                 info!("Found Pump.fun MIGRATE transaction: {}", processed_tx.signature);
 
@@ -1211,6 +1210,7 @@ impl SolanaBlockScanner {
         // Get the appropriate discriminator for the instruction type
         let discriminator = match instruction_type {
             PumpFunInstructionType::Buy => &BUY_INSTRUCTION_DISCRIMINATOR,
+            PumpFunInstructionType::Sell => &SELL_INSTRUCTION_DISCRIMINATOR,
             PumpFunInstructionType::Create => &CREATE_INSTRUCTION_DISCRIMINATOR,
             PumpFunInstructionType::Migrate => &MIGRATE_INSTRUCTION_DISCRIMINATOR,
             _ => return None,
@@ -1395,7 +1395,7 @@ impl SolanaBlockScanner {
                     Ok(mut bonding_curve_state) => {
                         // Set the last_updated timestamp
                         bonding_curve_state.last_updated = Utc::now();
-                        info!("Successfully extracted bonding curve state for {}: real_sol_reserves={} lamports ({:.4} SOL), real_token_reserves={}, complete={}", 
+                        debug!("Successfully extracted bonding curve state for {}: real_sol_reserves={} lamports ({:.4} SOL), real_token_reserves={}, complete={}", 
                               bonding_curve_address, 
                               bonding_curve_state.real_sol_reserves,
                               bonding_curve_state.real_sol_reserves as f64 / 1_000_000_000.0,
