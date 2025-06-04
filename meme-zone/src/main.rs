@@ -1230,8 +1230,8 @@ impl SolanaBlockScanner {
                                         if data.len() >= 8 && data[0..8] == discriminator[..] {
                                             // For different instruction types, the mint account is at different positions
                                             let mint_account_index = match instruction_type {
-                                                PumpFunInstructionType::Buy | PumpFunInstructionType::Create => {
-                                                    // For buy/create, mint is typically the 3rd account (index 2)
+                                                PumpFunInstructionType::Buy | PumpFunInstructionType::Sell | PumpFunInstructionType::Create => {
+                                                    // For buy/sell/create, mint is typically the 3rd account (index 2)
                                                     if compiled.accounts.len() > 2 { Some(2) } else { None }
                                                 }
                                                 PumpFunInstructionType::Migrate => {
@@ -1262,7 +1262,7 @@ impl SolanaBlockScanner {
                                 if data.len() >= 8 && data[0..8] == discriminator[..] {
                                     // For different instruction types, the mint account is at different positions
                                     let mint_account_index = match instruction_type {
-                                        PumpFunInstructionType::Buy | PumpFunInstructionType::Create => {
+                                        PumpFunInstructionType::Buy | PumpFunInstructionType::Sell | PumpFunInstructionType::Create => {
                                             // For buy/create, mint is typically the 3rd account (index 2)
                                             if instruction.accounts.len() > 2 { Some(2) } else { None }
                                         }
