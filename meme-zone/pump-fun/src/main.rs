@@ -1222,8 +1222,8 @@ impl SolanaBlockScanner {
 
                                 // Check if this is a buy instruction
                                 if let Ok(decoded_data) = bs58::decode(&compiled.data).into_vec() {
-                                    if decoded_data.len() >= 8 && decoded_data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
-                                        // For buy instructions, bonding curve is typically at account index 3
+                                    if decoded_data.len() >= 8 && (decoded_data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR || decoded_data[0..8] == SELL_INSTRUCTION_DISCRIMINATOR) {
+                                        // For buy/sell instructions, bonding curve is typically at account index 3
                                         if compiled.accounts.len() > 3 {
                                             let bonding_curve_index = compiled.accounts[3] as usize;
                                             if bonding_curve_index < parsed_message.account_keys.len() {
