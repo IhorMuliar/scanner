@@ -1,5 +1,9 @@
 // Import from the library crate
-use meme_scanner::{PumpFunStrategy, SolanaBlockScanner, TokenPlatformTrait};
+use meme_scanner::{
+    platforms::{BoopFunStrategy, MoonitStrategy, PumpFunStrategy, RaydiumLaunchlabStrategy},  
+    SolanaBlockScanner, 
+    TokenPlatformTrait
+};
 
 use anyhow::Result;
 use clap::Parser;
@@ -77,8 +81,11 @@ async fn main() -> Result<()> {
     // Select platform strategy based on args
     let platform: Box<dyn TokenPlatformTrait> = match args.platform.as_str() {
         "pump-fun" => Box::new(PumpFunStrategy::new()),
+        "boop-fun" => Box::new(BoopFunStrategy::new()),
+        "raydium" => Box::new(RaydiumLaunchlabStrategy::new()),
+        "moonit" => Box::new(MoonitStrategy::new()),
         // Support for other platforms will be added later
-        "raydium" | "moonit" => {
+        "meteora" => {
             return Err(anyhow::anyhow!(
                 "Platform '{}' is not yet implemented. Currently only 'pump-fun' is supported.",
                 args.platform
