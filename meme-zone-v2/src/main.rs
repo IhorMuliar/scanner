@@ -104,6 +104,12 @@ async fn main() -> Result<()> {
     )
     .await?;
 
+    let data_encoded = "8B8g4BR2oTj";
+
+    let data_decoded = bs58::decode(data_encoded).into_vec().unwrap();
+
+    println!("Data decoded: {:?}", data_decoded);
+
     // Start scanning
     scanner.start_scanning().await?;
 
