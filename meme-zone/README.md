@@ -61,7 +61,7 @@ The scanner uses a strategy pattern to abstract platform-specific behavior:
 3. Build the project:
 
 ```bash
-cd meme-zone-v2
+cd meme-zone
 cargo build --release
 ```
 
