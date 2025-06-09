@@ -1,6 +1,12 @@
 // Import from the library crate
 use meme_scanner::{
-    platforms::{BoopFunStrategy, MoonitStrategy, PumpFunStrategy, RaydiumLaunchlabStrategy},  
+    platforms::{
+        BoopFunStrategy,
+        DynamicBondingCurveStrategy,
+        MoonitStrategy,
+        PumpFunStrategy,
+        RaydiumLaunchlabStrategy
+    },  
     SolanaBlockScanner, 
     TokenPlatformTrait
 };
@@ -80,17 +86,11 @@ async fn main() -> Result<()> {
 
     // Select platform strategy based on args
     let platform: Box<dyn TokenPlatformTrait> = match args.platform.as_str() {
-        "pump-fun" => Box::new(PumpFunStrategy::new()),
         "boop-fun" => Box::new(BoopFunStrategy::new()),
+        "dynamic-bonding-curve" => Box::new(DynamicBondingCurveStrategy::new()),
+        "pump-fun" => Box::new(PumpFunStrategy::new()),
         "raydium" => Box::new(RaydiumLaunchlabStrategy::new()),
         "moonit" => Box::new(MoonitStrategy::new()),
-        // Support for other platforms will be added later
-        "meteora" => {
-            return Err(anyhow::anyhow!(
-                "Platform '{}' is not yet implemented. Currently only 'pump-fun' is supported.",
-                args.platform
-            ));
-        }
         _ => {
             return Err(anyhow::anyhow!(
                 "Unsupported platform: {}. Valid options are: pump-fun, raydium, moonit",

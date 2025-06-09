@@ -477,7 +477,7 @@ impl TokenPlatformTrait for BoopFunStrategy {
                             if program_id == BOOP_FUN_PROGRAM_ID {
                                 // Check if this is a buy instruction
                                 if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
-                                    if data.len() >= 8 && data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
+                                    if data.len() >= 8 && (data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR || data[0..8] == SELL_INSTRUCTION_DISCRIMINATOR) {
                                         // For buy instructions, bonding curve is typically at account index 3
                                         if instruction.accounts.len() > 3 {
                                             let bonding_curve_index = instruction.accounts[3] as usize;

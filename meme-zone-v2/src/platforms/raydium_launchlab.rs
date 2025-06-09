@@ -484,7 +484,7 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
                             if program_id == RAYDIUM_LAUNCHLAB_PROGRAM_ID {
                                 // Check if this is a buy instruction
                                 if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
-                                    if data.len() >= 8 && data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
+                                    if data.len() >= 8 && (data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR || data[0..8] == SELL_INSTRUCTION_DISCRIMINATOR) {
                                         // For buy instructions, bonding curve is typically at account index 4
                                         if instruction.accounts.len() > 4 {
                                             let bonding_curve_index = instruction.accounts[4] as usize;

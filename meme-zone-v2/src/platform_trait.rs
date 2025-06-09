@@ -5,9 +5,12 @@ use std::fmt::Debug;
 /// Enum representing the different types of instructions that can be processed
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstructionType {
+    Swap,
     Buy,
     Sell,
     Create,
+    /// Initialize virtual pool with token2022 instruction discriminator
+    InitializeVirtualPoolWithToken2022,
     /// General migrate instruction (for platforms with single migrate type)
     Migrate,
     /// AMM-specific migrate instruction (for Raydium Launchlab)
