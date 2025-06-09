@@ -6,74 +6,82 @@ use std::fmt;
 
 use crate::platform_trait::{BondingCurveStateTrait, InstructionType, TokenPlatformTrait};
 
-/// Constants for Pump.fun program
-const PUMP_FUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+/// Constants for Raydium Launchlab program
+const RAYDIUM_LAUNCHLAB_PROGRAM_ID: &str = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj";
 /// Instruction discriminators for Raydium Launch Lab program instructions
-const BUY_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
-const SELL_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
-const CREATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [24, 30, 200, 40, 5, 28, 7, 119];
-const MIGRATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [155, 234, 231, 146, 236, 158, 162, 30];
+const BUY_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [250, 234, 13, 123, 213, 156, 19, 236];
+const SELL_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [149, 39, 222, 155, 211, 124, 152, 26];
+const CREATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [175, 175, 109, 31, 13, 152, 155, 237];
+const MIGRATE_AMM_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [207, 82, 192, 145, 254, 207, 145, 223];
+const MIGRATE_CPSWAP_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [136, 92, 200, 103, 28, 218, 144, 140];
 /// Bonding curve constants for graduation calculations
 /// Initial virtual token reserves at the start of the curve (1,073,000,000 * 10^6)
-const INITIAL_VIRTUAL_TOKEN_RESERVES: u64 = 1_073_000_000_000_000;
+const INITIAL_VIRTUAL_BASE: u64 = 1_073_000_000_000_000;
 /// Total tokens that can be sold from the curve (793,100,000 * 10^6)
 const TOTAL_SELLABLE_TOKENS: u64 = 793_100_000_000_000;
 /// SOL threshold for graduation to Raydium (approximately 85 SOL)
-const GRADUATION_SOL_THRESHOLD: f64 = 85.0;
+const GRADUATION_QUOTE_THRESHOLD: f64 = 85.0;
 /// Graduation progress thresholds for alerting
 const GRADUATION_ALERT_THRESHOLDS: &[f64] = &[50.0, 70.0, 80.0, 90.0, 95.0, 99.0];
 
-/// Bonding curve state for Pump.fun tokens
+/// Bonding curve status constants
+/// Active trading phase
+const STATUS_ACTIVE: u8 = 0;
+/// Completed/migrated to AMM
+const STATUS_COMPLETED: u8 = 1;
+
+/// Bonding curve state for Raydium Launchlab tokens
 #[derive(Debug, BorshDeserialize)]
-pub struct PumpFunBondingCurveState {
-    discriminator: u64,
-    /// Virtual token reserves (for pricing calculations)
-    virtual_token_reserves: u64,
-    /// Virtual SOL reserves (for pricing calculations)
-    virtual_sol_reserves: u64,
-    /// Real token reserves (actual tokens remaining)
-    real_token_reserves: u64,
-    /// Real SOL reserves (actual SOL collected)
-    real_sol_reserves: u64,
-    /// Total supply of the token
-    token_total_supply: u64,
-    /// Whether the curve has completed and migrated
-    complete: bool,
-    /// Creator of the curve
-    creator: Pubkey,
+pub struct RaydiumLaunchlabBondingCurveState {
+    epoch: u64,
+    auth_bump: u8,
+    status: u8,
+    base_decimals: u8,
+    quote_decimals: u8,
+    migrate_type: u8,
+    supply: u64,
+    total_base_sell: u64,
+    virtual_base: u64,
+    virtual_quote: u64,
+    real_base: u64,
+    real_quote: u64,
+    total_quote_fund_raising: u64,
+    quote_protocol_fee: u64,
+    platform_fee: u64,
+    migrate_fee: u64,
 }
 
-impl BondingCurveStateTrait for PumpFunBondingCurveState {
+impl BondingCurveStateTrait for RaydiumLaunchlabBondingCurveState {
     /// Calculate the graduation progress percentage (0-100)
-    /// Based on: ((INITIAL_VIRTUAL_TOKEN_RESERVES - virtual_token_reserves) * 100) / TOTAL_SELLABLE_TOKENS
+    /// Based on: ((INITIAL_VIRTUAL_BASE - virtual_base) * 100) / TOTAL_SELLABLE_TOKENS
     fn calculate_graduation_progress(&self) -> f64 {
-        if self.virtual_token_reserves >= INITIAL_VIRTUAL_TOKEN_RESERVES {
+        // Using virtual_base instead of virtual_token_reserves
+        if self.virtual_base >= INITIAL_VIRTUAL_BASE {
             return 0.0;
         }
         
-        let tokens_sold = INITIAL_VIRTUAL_TOKEN_RESERVES - self.virtual_token_reserves;
+        let tokens_sold = INITIAL_VIRTUAL_BASE - self.virtual_base;
         (tokens_sold as f64 * 100.0) / TOTAL_SELLABLE_TOKENS as f64
     }
     
-    /// Calculate current market cap in SOL using bonding curve formula
-    /// Using virtual reserves for accurate pricing: virtual_sol_reserves / virtual_token_reserves
+    /// Calculate current market cap in quote token using bonding curve formula
+    /// Using virtual reserves for accurate pricing: virtual_quote / virtual_base
     fn calculate_market_cap(&self) -> f64 {
-        if self.virtual_token_reserves == 0 {
+        if self.virtual_base == 0 {
             return 0.0;
         }
         
-        // Current price per token in SOL
-        let price_per_token = self.virtual_sol_reserves as f64 / self.virtual_token_reserves as f64;
+        // Current price per token in quote token
+        let price_per_token = self.virtual_quote as f64 / self.virtual_base as f64;
         
         // Market cap = price * circulating supply
-        let circulating_supply = self.token_total_supply - self.real_token_reserves;
-
-        (price_per_token * circulating_supply as f64) / 1_000_000_000.0 // Convert from lamports
+        let circulating_supply = self.supply - self.real_base;
+        (price_per_token * circulating_supply as f64) / (10u64.pow(self.quote_decimals as u32) as f64)
     }
     
     /// Calculate SOL needed to reach graduation threshold
     fn needed_for_graduation(&self) -> f64 {
-        (GRADUATION_SOL_THRESHOLD - self.current_sol_amount()).max(0.0)
+        (GRADUATION_QUOTE_THRESHOLD - self.current_sol_amount()).max(0.0)
     }
     
     /// Check if token is close to graduation (above any threshold)
@@ -83,40 +91,47 @@ impl BondingCurveStateTrait for PumpFunBondingCurveState {
             .find(|&&threshold| progress >= threshold)
             .copied()
     }
-
+    
+    /// Get current quote token amount
     fn current_sol_amount(&self) -> f64 {
-        self.real_sol_reserves as f64 / 1_000_000_000.0
+        // Convert real_quote to the proper decimal representation
+        self.real_quote as f64 / (10u64.pow(self.quote_decimals as u32) as f64)
     }
-
+    
+    /// Check if curve is complete/migrated
     fn is_complete(&self) -> bool {
-        self.complete
+        // Check if status indicates completion
+        self.status == STATUS_COMPLETED || 
+        // Also check if graduation threshold has been reached
+        self.current_sol_amount() >= GRADUATION_QUOTE_THRESHOLD
     }
 }
 
-impl fmt::Display for PumpFunBondingCurveState {
+impl fmt::Display for RaydiumLaunchlabBondingCurveState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "PumpFunBondingCurve {{ progress: {:.2}%, cap: {:.2} SOL, needed: {:.2} SOL }}",
+            "RaydiumLaunchlabBondingCurve {{ progress: {:.2}%, cap: {:.2} SOL, needed: {:.2} SOL, status: {} }}",
             self.calculate_graduation_progress(),
             self.calculate_market_cap(),
-            self.needed_for_graduation()
+            self.needed_for_graduation(),
+            self.status
         )
     }
 }
 
-/// Strategy implementation for Pump.fun platform
-pub struct PumpFunStrategy;
+/// Strategy implementation for Raydium Launchlab platform
+pub struct RaydiumLaunchlabStrategy;
 
-impl PumpFunStrategy {
+impl RaydiumLaunchlabStrategy {
     pub fn new() -> Self {
-        PumpFunStrategy
+        RaydiumLaunchlabStrategy
     }
 }
 
-impl TokenPlatformTrait for PumpFunStrategy {
+impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
     fn program_id(&self) -> &'static str {
-        PUMP_FUN_PROGRAM_ID
+        RAYDIUM_LAUNCHLAB_PROGRAM_ID
     }
     
     fn buy_instruction_discriminator(&self) -> &'static [u8; 8] {
@@ -132,7 +147,16 @@ impl TokenPlatformTrait for PumpFunStrategy {
     }
     
     fn migrate_instruction_discriminator(&self) -> &'static [u8; 8] {
-        &MIGRATE_INSTRUCTION_DISCRIMINATOR
+        // Default to AMM migrate for general migrate calls
+        &MIGRATE_AMM_INSTRUCTION_DISCRIMINATOR
+    }
+    
+    fn migrate_amm_instruction_discriminator(&self) -> Option<&'static [u8; 8]> {
+        Some(&MIGRATE_AMM_INSTRUCTION_DISCRIMINATOR)
+    }
+    
+    fn migrate_cpswap_instruction_discriminator(&self) -> Option<&'static [u8; 8]> {
+        Some(&MIGRATE_CPSWAP_INSTRUCTION_DISCRIMINATOR)
     }
     
     fn is_platform_transaction(&self, transaction: &EncodedTransactionWithStatusMeta) -> bool {
@@ -142,12 +166,12 @@ impl TokenPlatformTrait for PumpFunStrategy {
                     solana_transaction_status::UiMessage::Parsed(parsed_message) => {
                         // Check if Pump.fun program ID is in account keys
                         parsed_message.account_keys.iter()
-                            .any(|key| key.pubkey == PUMP_FUN_PROGRAM_ID)
+                            .any(|key| key.pubkey == RAYDIUM_LAUNCHLAB_PROGRAM_ID)
                     }
                     solana_transaction_status::UiMessage::Raw(raw_message) => {
                         // Check if Pump.fun program ID is in account keys
                         raw_message.account_keys.iter()
-                            .any(|key| key == PUMP_FUN_PROGRAM_ID)
+                            .any(|key| key == RAYDIUM_LAUNCHLAB_PROGRAM_ID)
                     }
                 }
             }
@@ -187,7 +211,7 @@ impl TokenPlatformTrait for PumpFunStrategy {
                                     }
 
                                     let program_id = &parsed_message.account_keys[program_idx].pubkey;
-                                    if program_id != PUMP_FUN_PROGRAM_ID {
+                                    if program_id != RAYDIUM_LAUNCHLAB_PROGRAM_ID {
                                         continue;
                                     }
 
@@ -216,7 +240,7 @@ impl TokenPlatformTrait for PumpFunStrategy {
                                 continue;
                             };
                             
-                            if program_id == PUMP_FUN_PROGRAM_ID {
+                            if program_id == RAYDIUM_LAUNCHLAB_PROGRAM_ID {
                                 // Decode instruction data from base58
                                 if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
                                     // Check if data starts with our target discriminator
@@ -241,8 +265,10 @@ impl TokenPlatformTrait for PumpFunStrategy {
             Some(InstructionType::Sell)
         } else if self.has_instruction_type(transaction, self.create_instruction_discriminator()) {
             Some(InstructionType::Create)
-        } else if self.has_instruction_type(transaction, self.migrate_instruction_discriminator()) {
-            Some(InstructionType::Migrate)
+        } else if self.has_instruction_type(transaction, &MIGRATE_AMM_INSTRUCTION_DISCRIMINATOR) {
+            Some(InstructionType::MigrateAmm)
+        } else if self.has_instruction_type(transaction, &MIGRATE_CPSWAP_INSTRUCTION_DISCRIMINATOR) {
+            Some(InstructionType::MigrateCpswap)
         } else {
             Some(InstructionType::Other)
         }
@@ -254,7 +280,8 @@ impl TokenPlatformTrait for PumpFunStrategy {
             InstructionType::Buy => &BUY_INSTRUCTION_DISCRIMINATOR,
             InstructionType::Sell => &SELL_INSTRUCTION_DISCRIMINATOR,
             InstructionType::Create => &CREATE_INSTRUCTION_DISCRIMINATOR,
-            InstructionType::Migrate => &MIGRATE_INSTRUCTION_DISCRIMINATOR,
+            InstructionType::Migrate | InstructionType::MigrateAmm => &MIGRATE_AMM_INSTRUCTION_DISCRIMINATOR,
+            InstructionType::MigrateCpswap => &MIGRATE_CPSWAP_INSTRUCTION_DISCRIMINATOR,
             _ => return None,
         };
 
@@ -272,11 +299,15 @@ impl TokenPlatformTrait for PumpFunStrategy {
                                         if data.len() >= 8 && data[0..8] == discriminator[..] {
                                             // For different instruction types, the mint account is at different positions
                                             let mint_account_index = match instruction_type {
-                                                InstructionType::Buy | InstructionType::Sell | InstructionType::Create => {
-                                                    // For buy/sell/create, mint is typically the 3rd account (index 2)
-                                                    if compiled.accounts.len() > 2 { Some(2) } else { None }
+                                                InstructionType::Buy | InstructionType::Sell => {
+                                                    // For buy/sell/create, mint is typically the 10th account (index 9)
+                                                    if compiled.accounts.len() > 9 { Some(9) } else { None }
                                                 }
-                                                InstructionType::Migrate => {
+                                                InstructionType::Create => {
+                                                    // For create, mint is typically the 7th account (index 6)
+                                                    if compiled.accounts.len() > 6 { Some(6) } else { None }
+                                                }
+                                                InstructionType::Migrate | InstructionType::MigrateAmm | InstructionType::MigrateCpswap => {
                                                     // For migrate, mint is typically the 2nd account (index 1)
                                                     if compiled.accounts.len() > 1 { Some(1) } else { None }
                                                 }
@@ -304,11 +335,15 @@ impl TokenPlatformTrait for PumpFunStrategy {
                                 if data.len() >= 8 && data[0..8] == discriminator[..] {
                                     // For different instruction types, the mint account is at different positions
                                     let mint_account_index = match instruction_type {
-                                        InstructionType::Buy | InstructionType::Sell | InstructionType::Create => {
-                                            // For buy/create, mint is typically the 3rd account (index 2)
-                                            if instruction.accounts.len() > 2 { Some(2) } else { None }
+                                        InstructionType::Buy | InstructionType::Sell => {
+                                            // For buy/create, mint is typically the 10th account (index 9)
+                                            if instruction.accounts.len() > 9 { Some(9) } else { None }
                                         }
-                                        InstructionType::Migrate => {
+                                        InstructionType::Create => {
+                                            // For create, mint is typically the 7th account (index 6)
+                                            if instruction.accounts.len() > 6 { Some(6) } else { None }
+                                        }
+                                        InstructionType::Migrate | InstructionType::MigrateAmm | InstructionType::MigrateCpswap => {
                                             // For migrate, mint is typically the 2nd account (index 1)
                                             if instruction.accounts.len() > 1 { Some(1) } else { None }
                                         }
@@ -417,16 +452,16 @@ impl TokenPlatformTrait for PumpFunStrategy {
                                 }
 
                                 let program_id = &parsed_message.account_keys[program_idx].pubkey;
-                                if program_id != PUMP_FUN_PROGRAM_ID {
+                                if program_id != RAYDIUM_LAUNCHLAB_PROGRAM_ID {
                                     continue;
                                 }
 
                                 // Check if this is a buy instruction
                                 if let Ok(decoded_data) = bs58::decode(&compiled.data).into_vec() {
                                     if decoded_data.len() >= 8 && (decoded_data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR || decoded_data[0..8] == SELL_INSTRUCTION_DISCRIMINATOR) {
-                                        // For buy/sell instructions, bonding curve is typically at account index 3
-                                        if compiled.accounts.len() > 3 {
-                                            let bonding_curve_index = compiled.accounts[3] as usize;
+                                        // For buy/sell instructions, bonding curve is typically at account index 4
+                                        if compiled.accounts.len() > 4 {
+                                            let bonding_curve_index = compiled.accounts[4] as usize;
                                             if bonding_curve_index < parsed_message.account_keys.len() {
                                                 return Some(parsed_message.account_keys[bonding_curve_index].pubkey.clone());
                                             }
@@ -446,13 +481,13 @@ impl TokenPlatformTrait for PumpFunStrategy {
                                 continue;
                             };
                             
-                            if program_id == PUMP_FUN_PROGRAM_ID {
+                            if program_id == RAYDIUM_LAUNCHLAB_PROGRAM_ID {
                                 // Check if this is a buy instruction
                                 if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
                                     if data.len() >= 8 && data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
-                                        // For buy instructions, bonding curve is typically at account index 3
-                                        if instruction.accounts.len() > 3 {
-                                            let bonding_curve_index = instruction.accounts[3] as usize;
+                                        // For buy instructions, bonding curve is typically at account index 4
+                                        if instruction.accounts.len() > 4 {
+                                            let bonding_curve_index = instruction.accounts[4] as usize;
                                             if bonding_curve_index < raw_message.account_keys.len() {
                                                 return Some(raw_message.account_keys[bonding_curve_index].clone());
                                             }
@@ -470,7 +505,7 @@ impl TokenPlatformTrait for PumpFunStrategy {
     }
     
     fn parse_bonding_curve_state(&self, account_data: &mut &[u8]) -> Result<Box<dyn BondingCurveStateTrait>> {
-        let state = PumpFunBondingCurveState::deserialize(account_data)
+        let state = RaydiumLaunchlabBondingCurveState::deserialize(account_data)
             .map_err(|e| anyhow!("Failed to deserialize bonding curve state: {}", e))?;
 
         Ok(Box::new(state))
@@ -478,6 +513,6 @@ impl TokenPlatformTrait for PumpFunStrategy {
 
     /// Returns the name of the bonding curve provider
     fn name(&self) -> &'static str {
-        "Pump.fun"
+        "Raydium Launchlab"
     }
 }

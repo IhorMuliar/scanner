@@ -8,7 +8,12 @@ pub enum InstructionType {
     Buy,
     Sell,
     Create,
+    /// General migrate instruction (for platforms with single migrate type)
     Migrate,
+    /// AMM-specific migrate instruction (for Raydium Launchlab)
+    MigrateAmm,
+    /// CPSWAP-specific migrate instruction (for Raydium Launchlab)
+    MigrateCpswap,
     Other,
 }
 
@@ -21,7 +26,18 @@ pub trait TokenPlatformTrait: Send + Sync + 'static {
     fn buy_instruction_discriminator(&self) -> &'static [u8; 8];
     fn sell_instruction_discriminator(&self) -> &'static [u8; 8];
     fn create_instruction_discriminator(&self) -> &'static [u8; 8];
+    /// General migrate instruction discriminator (for platforms with single migrate type)
     fn migrate_instruction_discriminator(&self) -> &'static [u8; 8];
+    
+    /// AMM-specific migrate instruction discriminator (optional, for platforms like Raydium Launchlab)
+    fn migrate_amm_instruction_discriminator(&self) -> Option<&'static [u8; 8]> {
+        None
+    }
+    
+    /// CPSWAP-specific migrate instruction discriminator (optional, for platforms like Raydium Launchlab)
+    fn migrate_cpswap_instruction_discriminator(&self) -> Option<&'static [u8; 8]> {
+        None
+    }
     
     /// Determine if a transaction involves this platform
     fn is_platform_transaction(&self, transaction: &EncodedTransactionWithStatusMeta) -> bool;
