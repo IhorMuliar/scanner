@@ -8,7 +8,7 @@ use crate::platform_trait::{BondingCurveStateTrait, InstructionType, TokenPlatfo
 
 /// Constants for Pump.fun program
 const PUMP_FUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
-/// Instruction discriminators for Raydium Launch Lab program instructions
+/// Instruction discriminators for Pump.fun program instructions
 const BUY_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
 const SELL_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
 const CREATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [24, 30, 200, 40, 5, 28, 7, 119];

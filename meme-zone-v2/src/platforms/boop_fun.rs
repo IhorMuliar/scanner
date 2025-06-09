@@ -6,82 +6,96 @@ use std::fmt;
 
 use crate::platform_trait::{BondingCurveStateTrait, InstructionType, TokenPlatformTrait};
 
-/// Constants for Raydium Launchlab program
-const RAYDIUM_LAUNCHLAB_PROGRAM_ID: &str = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj";
-/// Instruction discriminators for Raydium Launch Lab program instructions
-const BUY_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [250, 234, 13, 123, 213, 156, 19, 236];
-const SELL_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [149, 39, 222, 155, 211, 124, 152, 26];
-const CREATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [175, 175, 109, 31, 13, 152, 155, 237];
-const MIGRATE_AMM_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [207, 82, 192, 145, 254, 207, 145, 223];
-const MIGRATE_CPSWAP_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [136, 92, 200, 103, 28, 218, 144, 140];
-/// Bonding curve constants for graduation calculations
-/// Initial virtual token reserves at the start of the curve (1,073,000,000 * 10^6)
-const INITIAL_VIRTUAL_BASE: u64 = 1_073_000_000_000_000;
-/// Total tokens that can be sold from the curve (793,100,000 * 10^6)
-const TOTAL_SELLABLE_TOKENS: u64 = 793_100_000_000_000;
-/// SOL threshold for graduation to Raydium (approximately 85 SOL)
-const GRADUATION_QUOTE_THRESHOLD: f64 = 85.0;
+/// Constants for Boop.fun program
+const BOOP_FUN_PROGRAM_ID: &str = "boop8hVGQGqehUK2iVEMEnMrL5RbjywRzHKBmBE7ry4";
+/// Instruction discriminators for Boop.fun program instructions
+const BUY_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [138, 127, 14, 91, 38, 87, 115, 105];
+const SELL_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [109, 61, 40, 187, 230, 176, 135, 174];
+const CREATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [84, 52, 204, 228, 24, 140, 234, 75];
+const MIGRATE_INSTRUCTION_DISCRIMINATOR: [u8; 8] = [45, 235, 225, 181, 17, 218, 64, 130];
 /// Graduation progress thresholds for alerting
 const GRADUATION_ALERT_THRESHOLDS: &[f64] = &[50.0, 70.0, 80.0, 90.0, 95.0, 99.0];
 
-/// Bonding curve status constants
-/// Active trading phase
-const STATUS_ACTIVE: u8 = 0;
-/// Completed/migrated to AMM
-const STATUS_COMPLETED: u8 = 1;
-
-/// Bonding curve state for Raydium Launchlab tokens
-#[derive(Debug, BorshDeserialize)]
-pub struct RaydiumLaunchlabBondingCurveState {
-    epoch: u64,
-    auth_bump: u8,
-    status: u8,
-    base_decimals: u8,
-    quote_decimals: u8,
-    migrate_type: u8,
-    supply: u64,
-    total_base_sell: u64,
-    virtual_base: u64,
-    virtual_quote: u64,
-    real_base: u64,
-    real_quote: u64,
-    total_quote_fund_raising: u64,
-    quote_protocol_fee: u64,
-    platform_fee: u64,
-    migrate_fee: u64,
+/// Bonding curve status enum matching the Boop.fun IDL
+#[derive(Debug, BorshDeserialize, PartialEq)]
+pub enum BondingCurveStatus {
+    Trading,
+    Graduated,
+    PoolPriceCorrected,
+    LiquidityProvisioned,
+    LiquidityLocked,
 }
 
-impl BondingCurveStateTrait for RaydiumLaunchlabBondingCurveState {
+/// Bonding curve state for Boop.fun tokens matching the actual IDL structure
+#[derive(Debug, BorshDeserialize)]
+pub struct BoopFunBondingCurveState {
+    /// Creator of the bonding curve
+    creator: Pubkey,
+    /// Token mint address
+    mint: Pubkey,
+    /// Virtual SOL reserves (for pricing calculations)
+    virtual_sol_reserves: u64,
+    /// Virtual token reserves (for pricing calculations)
+    virtual_token_reserves: u64,
+    /// SOL target amount for graduation to Raydium
+    graduation_target: u64,
+    /// Fee taken during graduation process
+    graduation_fee: u64,
+    /// Real SOL reserves (actual SOL collected)
+    sol_reserves: u64,
+    /// Real token reserves (actual tokens remaining)
+    token_reserves: u64,
+    /// Damping term affecting curve calculations
+    damping_term: u8,
+    /// Swap fee in basis points (e.g., 100 = 1%)
+    swap_fee_basis_points: u8,
+    /// Token percentage for stakers in basis points
+    token_for_stakers_basis_points: u16,
+    /// Current status of the bonding curve
+    status: BondingCurveStatus,
+}
+
+impl BondingCurveStateTrait for BoopFunBondingCurveState {
     /// Calculate the graduation progress percentage (0-100)
-    /// Based on: ((INITIAL_VIRTUAL_BASE - virtual_base) * 100) / TOTAL_SELLABLE_TOKENS
+    /// Based on: (sol_reserves * 100) / graduation_target
+    /// Boop.fun graduation is based on SOL collected, not tokens sold
     fn calculate_graduation_progress(&self) -> f64 {
-        // Using virtual_base instead of virtual_token_reserves
-        if self.virtual_base >= INITIAL_VIRTUAL_BASE {
+        if self.graduation_target == 0 {
             return 0.0;
         }
         
-        let tokens_sold = INITIAL_VIRTUAL_BASE - self.virtual_base;
-        (tokens_sold as f64 * 100.0) / TOTAL_SELLABLE_TOKENS as f64
+        // Progress is based on actual SOL collected vs graduation target
+        (self.sol_reserves as f64 * 100.0) / self.graduation_target as f64
     }
     
-    /// Calculate current market cap in quote token using bonding curve formula
-    /// Using virtual reserves for accurate pricing: virtual_quote / virtual_base
+    /// Calculate current market cap in SOL using bonding curve formula
+    /// Using virtual reserves for accurate pricing: virtual_sol_reserves / virtual_token_reserves
     fn calculate_market_cap(&self) -> f64 {
-        if self.virtual_base == 0 {
+        if self.virtual_token_reserves == 0 {
             return 0.0;
         }
         
-        // Current price per token in quote token
-        let price_per_token = self.virtual_quote as f64 / self.virtual_base as f64;
+        // Current price per token in SOL using virtual reserves
+        let price_per_token = self.virtual_sol_reserves as f64 / self.virtual_token_reserves as f64;
         
+        // Calculate circulating supply as tokens that have been purchased
+        // This is an approximation based on the difference between virtual and real reserves
+        let tokens_in_circulation = if self.virtual_token_reserves > self.token_reserves {
+            self.virtual_token_reserves - self.token_reserves
+        } else {
+            0
+        };
+
         // Market cap = price * circulating supply
-        let circulating_supply = self.supply - self.real_base;
-        (price_per_token * circulating_supply as f64) / (10u64.pow(self.quote_decimals as u32) as f64)
+        (price_per_token * tokens_in_circulation as f64) / 1_000_000_000.0 // Convert from lamports
     }
     
     /// Calculate SOL needed to reach graduation threshold
+    /// Uses the dynamic graduation_target from the bonding curve account
     fn needed_for_graduation(&self) -> f64 {
-        (GRADUATION_QUOTE_THRESHOLD - self.current_sol_amount()).max(0.0)
+        let graduation_target_sol = self.graduation_target as f64 / 1_000_000_000.0; // Convert to SOL
+        let current_sol = self.current_sol_amount();
+        (graduation_target_sol - current_sol).max(0.0)
     }
     
     /// Check if token is close to graduation (above any threshold)
@@ -91,27 +105,26 @@ impl BondingCurveStateTrait for RaydiumLaunchlabBondingCurveState {
             .find(|&&threshold| progress >= threshold)
             .copied()
     }
-    
-    /// Get current quote token amount
+
+    /// Get current SOL amount collected in the bonding curve
     fn current_sol_amount(&self) -> f64 {
-        // Convert real_quote to the proper decimal representation
-        self.real_quote as f64 / (10u64.pow(self.quote_decimals as u32) as f64)
+        self.sol_reserves as f64 / 1_000_000_000.0
     }
-    
-    /// Check if curve is complete/migrated
+
+    /// Check if the bonding curve has completed (graduated)
     fn is_complete(&self) -> bool {
-        // Check if status indicates completion
-        self.status == STATUS_COMPLETED || 
-        // Also check if graduation threshold has been reached
-        self.current_sol_amount() >= GRADUATION_QUOTE_THRESHOLD
+        matches!(self.status, BondingCurveStatus::Graduated | 
+                            BondingCurveStatus::PoolPriceCorrected | 
+                            BondingCurveStatus::LiquidityProvisioned | 
+                            BondingCurveStatus::LiquidityLocked)
     }
 }
 
-impl fmt::Display for RaydiumLaunchlabBondingCurveState {
+impl fmt::Display for BoopFunBondingCurveState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "RaydiumLaunchlabBondingCurve {{ progress: {:.2}%, cap: {:.2} SOL, needed: {:.2} SOL, status: {} }}",
+            "BoopFunBondingCurve {{ progress: {:.2}%, cap: {:.2} SOL, needed: {:.2} SOL, status: {:?} }}",
             self.calculate_graduation_progress(),
             self.calculate_market_cap(),
             self.needed_for_graduation(),
@@ -120,18 +133,18 @@ impl fmt::Display for RaydiumLaunchlabBondingCurveState {
     }
 }
 
-/// Strategy implementation for Raydium Launchlab platform
-pub struct RaydiumLaunchlabStrategy;
+/// Strategy implementation for Pump.fun platform
+pub struct BoopFunStrategy;
 
-impl RaydiumLaunchlabStrategy {
+impl BoopFunStrategy {
     pub fn new() -> Self {
-        RaydiumLaunchlabStrategy
+        BoopFunStrategy
     }
 }
 
-impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
+impl TokenPlatformTrait for BoopFunStrategy {
     fn program_id(&self) -> &'static str {
-        RAYDIUM_LAUNCHLAB_PROGRAM_ID
+        BOOP_FUN_PROGRAM_ID
     }
     
     fn buy_instruction_discriminator(&self) -> &'static [u8; 8] {
@@ -147,16 +160,7 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
     }
     
     fn migrate_instruction_discriminator(&self) -> &'static [u8; 8] {
-        // Default to AMM migrate for general migrate calls
-        &MIGRATE_AMM_INSTRUCTION_DISCRIMINATOR
-    }
-    
-    fn migrate_amm_instruction_discriminator(&self) -> Option<&'static [u8; 8]> {
-        Some(&MIGRATE_AMM_INSTRUCTION_DISCRIMINATOR)
-    }
-    
-    fn migrate_cpswap_instruction_discriminator(&self) -> Option<&'static [u8; 8]> {
-        Some(&MIGRATE_CPSWAP_INSTRUCTION_DISCRIMINATOR)
+        &MIGRATE_INSTRUCTION_DISCRIMINATOR
     }
     
     fn is_platform_transaction(&self, transaction: &EncodedTransactionWithStatusMeta) -> bool {
@@ -164,14 +168,14 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
             solana_transaction_status::EncodedTransaction::Json(ui_transaction) => {
                 match &ui_transaction.message {
                     solana_transaction_status::UiMessage::Parsed(parsed_message) => {
-                        // Check if Pump.fun program ID is in account keys
+                        // Check if Boop.fun program ID is in account keys
                         parsed_message.account_keys.iter()
-                            .any(|key| key.pubkey == RAYDIUM_LAUNCHLAB_PROGRAM_ID)
+                            .any(|key| key.pubkey == BOOP_FUN_PROGRAM_ID)
                     }
                     solana_transaction_status::UiMessage::Raw(raw_message) => {
-                        // Check if Pump.fun program ID is in account keys
+                        // Check if Boop.fun program ID is in account keys
                         raw_message.account_keys.iter()
-                            .any(|key| key == RAYDIUM_LAUNCHLAB_PROGRAM_ID)
+                            .any(|key| key == BOOP_FUN_PROGRAM_ID)
                     }
                 }
             }
@@ -211,7 +215,7 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
                                     }
 
                                     let program_id = &parsed_message.account_keys[program_idx].pubkey;
-                                    if program_id != RAYDIUM_LAUNCHLAB_PROGRAM_ID {
+                                    if program_id != BOOP_FUN_PROGRAM_ID {
                                         continue;
                                     }
 
@@ -240,7 +244,7 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
                                 continue;
                             };
                             
-                            if program_id == RAYDIUM_LAUNCHLAB_PROGRAM_ID {
+                            if program_id == BOOP_FUN_PROGRAM_ID {
                                 // Decode instruction data from base58
                                 if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
                                     // Check if data starts with our target discriminator
@@ -265,10 +269,8 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
             Some(InstructionType::Sell)
         } else if self.has_instruction_type(transaction, self.create_instruction_discriminator()) {
             Some(InstructionType::Create)
-        } else if self.has_instruction_type(transaction, &MIGRATE_AMM_INSTRUCTION_DISCRIMINATOR) {
-            Some(InstructionType::MigrateAmm)
-        } else if self.has_instruction_type(transaction, &MIGRATE_CPSWAP_INSTRUCTION_DISCRIMINATOR) {
-            Some(InstructionType::MigrateCpswap)
+        } else if self.has_instruction_type(transaction, self.migrate_instruction_discriminator()) {
+            Some(InstructionType::Migrate)
         } else {
             Some(InstructionType::Other)
         }
@@ -280,8 +282,7 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
             InstructionType::Buy => &BUY_INSTRUCTION_DISCRIMINATOR,
             InstructionType::Sell => &SELL_INSTRUCTION_DISCRIMINATOR,
             InstructionType::Create => &CREATE_INSTRUCTION_DISCRIMINATOR,
-            InstructionType::Migrate | InstructionType::MigrateAmm => &MIGRATE_AMM_INSTRUCTION_DISCRIMINATOR,
-            InstructionType::MigrateCpswap => &MIGRATE_CPSWAP_INSTRUCTION_DISCRIMINATOR,
+            InstructionType::Migrate => &MIGRATE_INSTRUCTION_DISCRIMINATOR,
             _ => return None,
         };
 
@@ -299,17 +300,13 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
                                         if data.len() >= 8 && data[0..8] == discriminator[..] {
                                             // For different instruction types, the mint account is at different positions
                                             let mint_account_index = match instruction_type {
-                                                InstructionType::Buy | InstructionType::Sell => {
-                                                    // For buy/sell, mint is typically the 10th account (index 9)
-                                                    if compiled.accounts.len() > 9 { Some(9) } else { None }
+                                                InstructionType::Buy | InstructionType::Sell | InstructionType::Migrate => {
+                                                    // For buy/sell/migrate, mint is typically the 1st account (index 0)
+                                                    if compiled.accounts.len() > 0 { Some(0) } else { None }
                                                 }
                                                 InstructionType::Create => {
-                                                    // For create, mint is typically the 7th account (index 6)
-                                                    if compiled.accounts.len() > 6 { Some(6) } else { None }
-                                                }
-                                                InstructionType::Migrate | InstructionType::MigrateAmm | InstructionType::MigrateCpswap => {
-                                                    // For migrate, mint is typically the 2nd account (index 1)
-                                                    if compiled.accounts.len() > 1 { Some(1) } else { None }
+                                                    // For create, mint is typically the 3rd account (index 2)
+                                                    if compiled.accounts.len() > 2 { Some(2) } else { None }
                                                 }
                                                 _ => None,
                                             };
@@ -335,17 +332,13 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
                                 if data.len() >= 8 && data[0..8] == discriminator[..] {
                                     // For different instruction types, the mint account is at different positions
                                     let mint_account_index = match instruction_type {
-                                        InstructionType::Buy | InstructionType::Sell => {
-                                            // For buy/sell, mint is typically the 10th account (index 9)
-                                            if instruction.accounts.len() > 9 { Some(9) } else { None }
+                                        InstructionType::Buy | InstructionType::Sell | InstructionType::Migrate => {
+                                            // For buy/sell/migrate, mint is typically the 1st account (index 0)
+                                            if instruction.accounts.len() > 0 { Some(0) } else { None }
                                         }
                                         InstructionType::Create => {
-                                            // For create, mint is typically the 7th account (index 6)
-                                            if instruction.accounts.len() > 6 { Some(6) } else { None }
-                                        }
-                                        InstructionType::Migrate | InstructionType::MigrateAmm | InstructionType::MigrateCpswap => {
-                                            // For migrate, mint is typically the 2nd account (index 1)
-                                            if instruction.accounts.len() > 1 { Some(1) } else { None }
+                                            // For create, mint is typically the 3rd account (index 2)
+                                            if instruction.accounts.len() > 2 { Some(2) } else { None }
                                         }
                                         _ => None,
                                     };
@@ -452,16 +445,16 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
                                 }
 
                                 let program_id = &parsed_message.account_keys[program_idx].pubkey;
-                                if program_id != RAYDIUM_LAUNCHLAB_PROGRAM_ID {
+                                if program_id != BOOP_FUN_PROGRAM_ID {
                                     continue;
                                 }
 
                                 // Check if this is a buy instruction
                                 if let Ok(decoded_data) = bs58::decode(&compiled.data).into_vec() {
                                     if decoded_data.len() >= 8 && (decoded_data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR || decoded_data[0..8] == SELL_INSTRUCTION_DISCRIMINATOR) {
-                                        // For buy/sell instructions, bonding curve is typically at account index 4
-                                        if compiled.accounts.len() > 4 {
-                                            let bonding_curve_index = compiled.accounts[4] as usize;
+                                        // For buy/sell instructions, bonding curve is typically at account index 3
+                                        if compiled.accounts.len() > 3 {
+                                            let bonding_curve_index = compiled.accounts[3] as usize;
                                             if bonding_curve_index < parsed_message.account_keys.len() {
                                                 return Some(parsed_message.account_keys[bonding_curve_index].pubkey.clone());
                                             }
@@ -481,13 +474,13 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
                                 continue;
                             };
                             
-                            if program_id == RAYDIUM_LAUNCHLAB_PROGRAM_ID {
+                            if program_id == BOOP_FUN_PROGRAM_ID {
                                 // Check if this is a buy instruction
                                 if let Ok(data) = bs58::decode(&instruction.data).into_vec() {
                                     if data.len() >= 8 && data[0..8] == BUY_INSTRUCTION_DISCRIMINATOR {
-                                        // For buy instructions, bonding curve is typically at account index 4
-                                        if instruction.accounts.len() > 4 {
-                                            let bonding_curve_index = instruction.accounts[4] as usize;
+                                        // For buy instructions, bonding curve is typically at account index 3
+                                        if instruction.accounts.len() > 3 {
+                                            let bonding_curve_index = instruction.accounts[3] as usize;
                                             if bonding_curve_index < raw_message.account_keys.len() {
                                                 return Some(raw_message.account_keys[bonding_curve_index].clone());
                                             }
@@ -505,7 +498,7 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
     }
     
     fn parse_bonding_curve_state(&self, account_data: &mut &[u8]) -> Result<Box<dyn BondingCurveStateTrait>> {
-        let state = RaydiumLaunchlabBondingCurveState::deserialize(account_data)
+        let state = BoopFunBondingCurveState::deserialize(account_data)
             .map_err(|e| anyhow!("Failed to deserialize bonding curve state: {}", e))?;
 
         Ok(Box::new(state))
@@ -513,6 +506,6 @@ impl TokenPlatformTrait for RaydiumLaunchlabStrategy {
 
     /// Returns the name of the bonding curve provider
     fn name(&self) -> &'static str {
-        "Raydium Launchlab"
+        "Boop.fun"
     }
 }
